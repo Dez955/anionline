@@ -2,6 +2,7 @@
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
+    var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
 
     function absolute(value, base) {
         try {
@@ -15,12 +16,13 @@
     function catalog(html) {
         var doc = page(html), cards = list(doc, '.news_2');
         if (!cards.length) cards = list(doc, '.short-in');
+        if (!cards.length) cards = list(doc, 'article.story');
         var seen = {};
         return cards.map(function (card) {
             var heading = card.querySelector('h2');
-            var link = card.querySelector('.title2 a[href]') || (heading && heading.closest('a[href]'));
+            var link = card.querySelector('.title2 a[href]') || (heading && heading.querySelector('a[href]')) || card.querySelector('a[href]');
             var url = link && absolute(link.getAttribute('href'), HOME);
-            var title = text(heading || link);
+            var title = text(link) || text(heading);
             if (!url || new URL(url).hostname !== 'anitube.in.ua' || !title || seen[url]) return null;
             seen[url] = true;
             return { title: title, url: url };
@@ -48,9 +50,17 @@
         return result;
     }
     function media(url) { return /^https:\/\//i.test(url) && /\.(m3u8|mp4|mpd|webm)(?:[?#]|$)/i.test(url); }
-    function fetchText(url, success, failure) {
-        // Request current AniTube HTML on every lookup instead of reusing a cached response.
-        $.ajax({url: url, dataType: 'text', timeout: 15000, cache: false, success: success, error: failure});
+    function fetchText(action, value, success, failure) {
+        // The function fetches AniTube on demand; neither the client nor proxy caches the response.
+        var parameter = action === 'search' ? 'q' : 'url';
+        $.ajax({url: API + '?action=' + action + '&' + parameter + '=' + encodeURIComponent(value), dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
+    }
+    function fetchPlaylist(url, success, failure) {
+        $.ajax({url: API + '?action=playlist&url=' + encodeURIComponent(url), dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
+    }
+    function requestError(prefix, xhr) {
+        var status = xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '';
+        error(prefix + status + '.');
     }
     function error(message) { Lampa.Noty.show(message, {time: 8000}); }
     function choose(title, items, selected, back) {
@@ -70,21 +80,22 @@
     }
     function unique(values) { return values.filter(function (v, i) { return v && values.indexOf(v) === i; }); }
     function searchUrl(query) {
-        return HOME + '?do=search&subaction=search&story=' + encodeURIComponent(query);
+        return query;
     }
     function lookup(movie, queryIndex) {
         var queries = unique([movie.title, movie.original_title, movie.name, movie.original_name]);
         if (queryIndex >= queries.length) return error('AniTube: за назвою цієї картки нічого не знайдено.');
-        fetchText(searchUrl(queries[queryIndex]), function (html) {
+        fetchText('search', searchUrl(queries[queryIndex]), function (html) {
             var items = catalog(html);
             if (!items.length) return lookup(movie, queryIndex + 1);
             choose('AniTube · Обери відповідний тайтл', items, function (item) { detail(item, movie); });
-        }, function () { error('AniTube: не вдалося виконати пошук (мережа, CORS або захист сайту).'); });
+        }, function (xhr) { requestError('AniTube: сервер пошуку не отримав сторінку сайту', xhr); });
     }
     function detail(item, movie) {
-        fetchText(item.url, function (html) {
-            var all = sources(html, item.url);
-            if (!all.length) return error('AniTube: список серій недоступний у HTML. Сайт може створювати його скриптом.');
+        fetchPlaylist(item.url, function (data) {
+            if (!data || !data.success || !data.response) return error('AniTube: сайт не повернув список серій.');
+            var all = sources(data.response, item.url);
+            if (!all.length) return error('AniTube: не вдалося розібрати список серій AniTube.');
             function modes() {
                 choose(item.title + ' · Тип', unique(all.map(function (x) { return x.mode; })).map(function (x) { return {title: x}; }), function (mode) { variants(mode.title); });
             }
@@ -106,7 +117,7 @@
                 }, function () { players(mode, variant); });
             }
             modes();
-        }, function () { error('AniTube: не вдалося завантажити сторінку аніме.'); });
+        }, function (xhr) { requestError('AniTube: сервер не отримав список серій', xhr); });
     }
     function addCardButton(event) {
         if (!event.object || !event.object.activity) return;
@@ -114,7 +125,7 @@
         var movie = event.data && event.data.movie;
         if (!movie || root.find('.anitube-card-button').length) return;
 
-        var button = $('<div class="full-start__button selector view--anitube anitube-card-button"><span>AniTube</span></div>');
+        var button = $('<div class="full-start__button selector view--anitube anitube-card-button"><span>🟢 AniTube</span></div>');
         button.on('hover:enter', function () { lookup(movie, 0); });
 
         // Match established Lampa online plugins: attach to the card's torrent button.
@@ -137,7 +148,7 @@
             name: '🟢 AniTube',
             description: 'Озвучення, субтитри та серії з AniTube',
             onContextMenu: function () {
-                return {name: 'Знайти на AniTube', description: ''};
+                return {name: '🟢 AniTube', description: 'Актуальний пошук на anitube.in.ua'};
             },
             onContextLauch: function (movie) {
                 lookup(movie || {}, 0);
