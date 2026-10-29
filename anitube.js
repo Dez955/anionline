@@ -49,7 +49,8 @@
     }
     function media(url) { return /^https:\/\//i.test(url) && /\.(m3u8|mp4|mpd|webm)(?:[?#]|$)/i.test(url); }
     function fetchText(url, success, failure) {
-        $.ajax({url: url, dataType: 'text', timeout: 15000, success: success, error: failure});
+        // Request current AniTube HTML on every lookup instead of reusing a cached response.
+        $.ajax({url: url, dataType: 'text', timeout: 15000, cache: false, success: success, error: failure});
     }
     function error(message) { Lampa.Noty.show(message, {time: 8000}); }
     function choose(title, items, selected, back) {
@@ -133,7 +134,7 @@
         Lampa.Manifest.plugins = {
             type: 'video',
             version: '0.2.0',
-            name: 'AniTube',
+            name: '🟢 AniTube',
             description: 'Озвучення, субтитри та серії з AniTube',
             onContextMenu: function () {
                 return {name: 'Знайти на AniTube', description: ''};
