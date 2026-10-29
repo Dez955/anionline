@@ -1,0 +1,4 @@
+[build]
+  command = "mkdir -p public && cp anitube.js public/anitube.js"
+  publish = "public"
+  functions = "netlify/functions"
