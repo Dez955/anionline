@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.6.3';
+    var VERSION = '0.6.4';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
 
     function absolute(value, base) {
@@ -193,6 +193,22 @@
 
     // ---- Names ---------------------------------------------------------------------------------------------------
     function unique(values) { return values.filter(function (v, i) { return v && values.indexOf(v) === i; }); }
+    // Names to search for, best first. Card titles can be whole sentences (the helpers refuse queries over 200 characters and
+    // AniTube's search finds nothing for them anyway), so a long title is cut to its first words and only that is tried.
+    function searchTerms(movie) {
+        var terms = [];
+        [movie.title, movie.original_title, movie.name, movie.original_name].forEach(function (name) {
+            var clean = String(name || '').replace(/\s+/g, ' ').trim();
+            if (!clean) return;
+            if (clean.length > 60) {
+                var words = clean.split(' ');
+                clean = words.slice(0, 5).join(' ');
+                if (clean.length > 60) clean = clean.slice(0, 60).replace(/\s+\S*$/, '');
+            }
+            terms.push(clean);
+        });
+        return unique(terms);
+    }
     function normalize(value) { return String(value || '').toLowerCase().replace(/[^a-zа-яіїєґ0-9]+/g, ' ').trim(); }
     function sentence(value) {
         var low = String(value || '').toLowerCase();
@@ -303,7 +319,7 @@
 
         // 1. find the title on AniTube (the card's own names, then the original ones)
         this.search = function (queryIndex) {
-            var queries = manual ? [manual] : unique([movie.title, movie.original_title, movie.name, movie.original_name]);
+            var queries = manual ? [manual] : searchTerms(movie);
             if (queryIndex >= queries.length) {
                 return this.empty(manual ? 'AniTube: за запитом «' + manual + '» нічого не знайдено. Спробуй інше слово через «Пошук» угорі.'
                     : 'AniTube: за назвою цієї картки нічого не знайдено. Натисни «Пошук» угорі й введи назву так, як вона на AniTube (часто достатньо одного слова).');
@@ -314,7 +330,10 @@
                 if (!found.length) return self.search(queryIndex + 1);
                 self.found(found, queries);
             }, function (xhr, why) {
-                if (!closed) self.empty('AniTube: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.');
+                if (closed) return;
+                // A 400 is about this particular query (e.g. too long); another name of the card may still work.
+                if (xhr && xhr.status === 400 && queryIndex + 1 < queries.length) return self.search(queryIndex + 1);
+                self.empty('AniTube: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.');
             });
         };
 
