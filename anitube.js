@@ -4,7 +4,8 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.5.0';
+    var VERSION = '0.5.1';
+    var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
 
     function absolute(value, base) {
         try {
@@ -21,13 +22,18 @@
         if (!cards.length) cards = list(doc, 'article.story');
         var seen = {};
         return cards.map(function (card) {
+            // AniTube serves different templates by client. On the mobile one (what Android Lampa receives) the card's first
+            // link wraps the poster and the "Озв+Суб" badge, and the real title is an <h2> inside a later link.
             var heading = card.querySelector('h2');
-            var link = card.querySelector('.title2 a[href]') || (heading && heading.querySelector('a[href]')) || card.querySelector('a[href]');
+            var titled = card.querySelector('.title2 a[href]');
+            var link = titled || (heading && (heading.querySelector('a[href]') || (heading.closest && heading.closest('a[href]')))) || card.querySelector('a[href]');
             var url = link && absolute(link.getAttribute('href'), HOME);
-            var title = text(link) || text(heading);
+            var title = (titled ? text(titled) : '') || text(heading) || text(link);
+            title = title.replace(/\s+/g, ' ').trim();
             if (!url || new URL(url).hostname !== 'anitube.in.ua' || !title || seen[url]) return null;
             seen[url] = true;
-            return { title: title, url: url };
+            var note = [text(card.querySelector('.short-meta')), text(card.querySelector('.up-series'))].map(function (part) { return part.replace(/\s+/g, ' ').trim(); }).filter(Boolean).join(' · ');
+            return { title: title, url: url, note: note };
         }).filter(Boolean);
     }
     function sources(html, base) {
@@ -287,7 +293,7 @@
             this.reset();
             this.updateFilter();
             results.forEach(function (result) {
-                var node = Lampa.Template.get('anitube_folder', {title: result.title, quality: 'Обери тайтл', info: ''});
+                var node = Lampa.Template.get('anitube_folder', {title: result.title, quality: result.note || 'Обери тайтл', info: ''});
                 node.on('hover:enter', function () { self.openTitle(result); });
                 self.append(node);
             });
@@ -396,16 +402,27 @@
             var entry = entries[index];
             if (!entry || entry.loading) return;
             entry.loading = true;
-            Lampa.Noty.show('AniTube: отримую відео…');
-            this.resolve(entry, function (stream) {
+            Lampa.Noty.show('AniTube: готую серії…');
+            // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
+            // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
+            // the rest stays lazy for Lampa's built-in player.
+            var from = Math.max(0, index - PLAYLIST_BEHIND), to = Math.min(entries.length - 1, index + PLAYLIST_AHEAD);
+            var pending = to - from + 1, failure = '';
+            function settled() {
+                if (--pending > 0) return;
                 entry.loading = false;
                 if (closed) return;
+                if (!entry.stream) {
+                    Lampa.Noty.show('AniTube: не вдалося отримати відео (' + reason(failure) + '). Спробуй іншу серію чи озвучення.', {time: 6000});
+                    return;
+                }
                 try { if (movie.id) Lampa.Favorite.add('history', movie, 100); } catch (e) {}
-                var first = {title: entry.title, url: stream, timeline: entry.timeline};
-                Lampa.Player.play(first);
-                // The full list lets the player's next/previous buttons switch episodes without leaving it.
-                Lampa.Player.playlist(entries.map(function (other, n) {
-                    if (n === index) return first;
+                var first = {title: entry.title, url: entry.stream, timeline: entry.timeline};
+                var playlist = [];
+                entries.forEach(function (other, n) {
+                    if (n === index) return playlist.push(first);
+                    if (other.stream) return playlist.push({title: other.title, url: other.stream, timeline: other.timeline});
+                    if (n >= from && n <= to) return; // resolution failed, leave it out
                     var cell = {
                         title: other.title,
                         timeline: other.timeline,
@@ -413,12 +430,15 @@
                             self.resolve(other, function (url) { cell.url = url; call(); }, function () { cell.url = ''; call(); });
                         }
                     };
-                    return cell;
-                }));
-            }, function (why) {
-                entry.loading = false;
-                Lampa.Noty.show('AniTube: не вдалося отримати відео (' + reason(why) + '). Спробуй іншу серію чи озвучення.', {time: 6000});
-            });
+                    playlist.push(cell);
+                });
+                Lampa.Player.play(first);
+                // The playlist lets the player's next/previous buttons switch episodes without leaving it.
+                Lampa.Player.playlist(playlist);
+            }
+            for (var n = from; n <= to; n++) {
+                this.resolve(entries[n], settled, function (why) { if (!failure) failure = why; settled(); });
+            }
         };
 
         this.start = function (first) {

@@ -30,7 +30,8 @@ Open a card and choose **🟢 AniTube**. The plugin opens its own screen, built 
 - The AniTube title is found by the card's names. If AniTube has several matches, they are listed; the choice is remembered per card. If nothing matches, use **Пошук** at the top and type the name as it appears on AniTube (often one word is enough); that query is remembered too.
 - Only the **Ashdi** player is offered, so there is no player step. The filter (press right, or move to the top) switches the voice/subtitle track (e.g. "Озвучення · QTV", "Субтитри · Рідний Голос") and, when there are several matches, the title.
 - Episodes show as "Серія N" with Lampa's watch-progress bar, and the cursor starts on the episode to continue with.
-- Starting an episode loads the whole list as the player's playlist, so the player's next/previous buttons switch episodes without leaving it. Back returns to the card.
+- Starting an episode hands the player a playlist, so its next/previous buttons switch episodes without leaving it. Lampa gives an external Android player only playlist items that already have a plain URL, so the plugin resolves the 3 episodes before and 15 after the chosen one up front (a second or two at start); Lampa's built-in player resolves the rest on demand. Back returns to the card.
+- AniTube serves a different page template to Android clients than to desktop browsers; the plugin reads both.
 
 ## Limits
 
