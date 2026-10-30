@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.5.2';
+    var VERSION = '0.6.0';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
 
     function absolute(value, base) {
@@ -63,19 +63,33 @@
     function media(url) { return /^https:\/\//i.test(url) && /\.(m3u8|mp4|mpd|webm)(?:[?#]|$)/i.test(url); }
 
     // ---- Network: Lampa's native request on Android first, Netlify proxy as fallback -------------------------------
+    // Address of the optional home-network helper (home-proxy/server.mjs) for TVs that cannot reach AniTube themselves.
+    function homeProxy() {
+        var value = '';
+        try { value = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_proxy')) || '').trim().replace(/\/+$/, ''); } catch (e) {}
+        return /^https?:\/\/\S+$/i.test(value) ? value : '';
+    }
     function proxyText(action, value, success, failure) {
-        // The function fetches AniTube on demand; neither the client nor proxy caches the response.
-        var parameter = action === 'search' ? 'q' : 'url';
-        $.ajax({url: API + '?action=' + action + '&' + parameter + '=' + encodeURIComponent(value), dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
+        // Neither the helper nor the Netlify function caches anything; AniTube is fetched on demand.
+        var home = homeProxy();
+        var url = home ? home + '/' + action + '?' + (action === 'search' ? 'q' : 'url') + '=' + encodeURIComponent(value)
+            : API + '?action=' + action + '&' + (action === 'search' ? 'q' : 'url') + '=' + encodeURIComponent(value);
+        $.ajax({url: url, dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
     }
     function proxyPlaylist(url, success, failure) {
-        $.ajax({url: API + '?action=playlist&url=' + encodeURIComponent(url), dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
+        var home = homeProxy();
+        $.ajax({url: home ? home + '/playlist?url=' + encodeURIComponent(url) : API + '?action=playlist&url=' + encodeURIComponent(url), dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
+    }
+    function proxyEmbed(url, success, failure) {
+        var home = homeProxy();
+        if (!home) return failure('домашній проксі не налаштовано');
+        $.ajax({url: home + '/embed?url=' + encodeURIComponent(url), dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
     }
     function reason(e) {
         if (e && e.status) return 'HTTP ' + e.status;
         var raw = e && (e.responseText || e.message || e);
         if (raw && typeof raw === 'object') raw = JSON.stringify(raw);
-        return String(raw || 'без відповіді').slice(0, 60);
+        return String(raw || 'без відповіді').slice(0, 140);
     }
     // Lampa on Android can send native requests that are not limited by browser CORS rules.
     function direct(url, options, success, failure) {
@@ -125,12 +139,19 @@
         } catch (e) { return false; }
     }
     function ashdiStream(url, success, failure) {
-        direct(url, {dataType: 'text', headers: {'Referer': HOME}}, function (html) {
+        function read(html, fail) {
             var match = String(html).match(/\bfile\s*:\s*(["'])(https:\/\/ashdi\.vip\/[^"']+?\.m3u8[^"']*)\1/i);
             var stream = match && absolute(match[2], url);
             if (stream && new URL(stream).hostname === 'ashdi.vip' && media(stream)) success(stream);
-            else failure('на сторінці плеєра немає посилання на відео');
-        }, failure);
+            else fail('на сторінці плеєра немає посилання на відео');
+        }
+        direct(url, {dataType: 'text', headers: {'Referer': HOME}}, function (html) {
+            read(html, failure);
+        }, function (e) {
+            proxyEmbed(url, function (html) { read(html, failure); }, function (xhr) {
+                failure(homeProxy() ? failureText(xhr, reason(e)) : (e === 'не Android' ? 'на цьому пристрої потрібен домашній проксі (Налаштування → AniTube)' : e));
+            });
+        });
     }
     // Direct request first (Android Lampa, home IP); the Netlify proxy is only a fallback.
     function fetchText(action, value, success, failure) {
@@ -148,8 +169,12 @@
         });
     }
     function failureText(xhr, directReason) {
+        var home = homeProxy();
         var status = xhr && xhr.status ? 'проксі: HTTP ' + xhr.status : 'проксі: помилка мережі';
-        return '(напряму: ' + directReason + '; ' + status + ')';
+        var hint = '';
+        if (!home && !(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'))) hint = ' На цьому пристрої потрібен домашній проксі: Налаштування → AniTube.';
+        else if (home && /^http:/i.test(home) && window.location && window.location.protocol === 'https:') hint = ' Lampa відкрита через https, тож браузер блокує http-проксі.';
+        return '(напряму: ' + directReason + '; ' + status + ')' + hint;
     }
 
     // ---- Names ---------------------------------------------------------------------------------------------------
@@ -488,6 +513,18 @@
         Lampa.Template.add('anitube_item', row(play));
         Lampa.Template.add('anitube_folder', row(folder));
     }
+    // Settings → AniTube: address of the home-network helper, only needed on TVs that cannot reach AniTube themselves.
+    function addSettings() {
+        try {
+            if (!Lampa.SettingsApi || Lampa.SettingsApi.getComponent && Lampa.SettingsApi.getComponent('anitube')) return;
+            Lampa.SettingsApi.addComponent({component: 'anitube', icon: '<svg><use xlink:href="#sprite-settings"></use></svg>', name: 'AniTube'});
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
+                field: {name: 'Адреса домашнього проксі', description: 'Потрібна на Smart TV (Tizen, webOS). На Android-приставці залиш порожнім.'}
+            });
+        } catch (e) {}
+    }
     function addCardButton(event) {
         if (!event.object || !event.object.activity) return;
         var root = event.object.activity.render();
@@ -509,6 +546,7 @@
         if (window.plugin_anitube_prototype_ready) return;
         window.plugin_anitube_prototype_ready = true;
         addTemplates();
+        addSettings();
         // Registered up front so Lampa can restore the screen after a restart.
         Lampa.Component.add(COMPONENT, component);
         Lampa.Listener.follow('full', function (event) {
