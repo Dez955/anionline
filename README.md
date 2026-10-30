@@ -32,7 +32,7 @@ Open a card and choose **🟢 AniTube**. The plugin opens its own screen, built 
 - Episodes show as "Серія N" with Lampa's watch-progress bar, and the cursor starts on the episode to continue with.
 - Starting an episode hands the player a playlist, so its next/previous buttons switch episodes without leaving it. Lampa gives an external Android player only playlist items that already have a plain URL, so the plugin resolves the 3 episodes before and 15 after the chosen one up front (a second or two at start); Lampa's built-in player resolves the rest on demand. Back returns to the card.
 - AniTube serves a different page template to Android clients than to desktop browsers; the plugin reads both.
-- **Samsung Tizen / LG webOS TVs** cannot read AniTube or Ashdi pages themselves (no CORS permission) and AniTube blocks the Netlify function, so they need the small helper in [`home-proxy/`](home-proxy/README.md) running on a device in your network; its address goes into Settings → AniTube. Not yet verified on a real Tizen/webOS TV.
+- **Samsung Tizen / LG webOS TVs** cannot read AniTube or Ashdi pages themselves (no CORS permission) and AniTube blocks the Netlify function, so they need the small helper in [`home-proxy/`](home-proxy/README.md) running on a device in your network; its address goes into Settings → AniTube. The owner's Cloudflare Worker address and key are built into the plugin as defaults (anything typed in Settings overrides them), so nothing has to be entered on a TV; the key is therefore public in this repository and can be rotated at any time (Cloudflare Worker secret, the bot's `ANITUBE_ACCESS_KEY`, and the constant in `anitube.js`).
 
 ## Limits
 
