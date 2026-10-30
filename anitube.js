@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.6.0';
+    var VERSION = '0.6.1';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
 
     function absolute(value, base) {
@@ -69,21 +69,29 @@
         try { value = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_proxy')) || '').trim().replace(/\/+$/, ''); } catch (e) {}
         return /^https?:\/\/\S+$/i.test(value) ? value : '';
     }
+    // Optional secret for a helper that is reachable from the internet (hosted server); sent as ?key=
+    function homeKey() {
+        try { return String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_proxy_key')) || '').trim(); } catch (e) { return ''; }
+    }
+    function homeUrl(home, action, name, value) {
+        var key = homeKey();
+        return home + '/' + action + '?' + name + '=' + encodeURIComponent(value) + (key ? '&key=' + encodeURIComponent(key) : '');
+    }
     function proxyText(action, value, success, failure) {
         // Neither the helper nor the Netlify function caches anything; AniTube is fetched on demand.
         var home = homeProxy();
-        var url = home ? home + '/' + action + '?' + (action === 'search' ? 'q' : 'url') + '=' + encodeURIComponent(value)
-            : API + '?action=' + action + '&' + (action === 'search' ? 'q' : 'url') + '=' + encodeURIComponent(value);
+        var name = action === 'search' ? 'q' : 'url';
+        var url = home ? homeUrl(home, action, name, value) : API + '?action=' + action + '&' + name + '=' + encodeURIComponent(value);
         $.ajax({url: url, dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
     }
     function proxyPlaylist(url, success, failure) {
         var home = homeProxy();
-        $.ajax({url: home ? home + '/playlist?url=' + encodeURIComponent(url) : API + '?action=playlist&url=' + encodeURIComponent(url), dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
+        $.ajax({url: home ? homeUrl(home, 'playlist', 'url', url) : API + '?action=playlist&url=' + encodeURIComponent(url), dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
     }
     function proxyEmbed(url, success, failure) {
         var home = homeProxy();
         if (!home) return failure('домашній проксі не налаштовано');
-        $.ajax({url: home + '/embed?url=' + encodeURIComponent(url), dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
+        $.ajax({url: homeUrl(home, 'embed', 'url', url), dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
     }
     function reason(e) {
         if (e && e.status) return 'HTTP ' + e.status;
@@ -521,7 +529,12 @@
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
-                field: {name: 'Адреса домашнього проксі', description: 'Потрібна на Smart TV (Tizen, webOS). На Android-приставці залиш порожнім.'}
+                field: {name: 'Адреса проксі', description: 'Потрібна на Smart TV (Tizen, webOS), наприклад https://назва.koyeb.app. На Android-приставці залиш порожнім.'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_proxy_key', type: 'input', values: '', 'default': '', placeholder: 'ключ доступу'},
+                field: {name: 'Ключ проксі', description: 'Потрібен, якщо проксі стоїть на сервері в інтернеті (ACCESS_KEY).'}
             });
         } catch (e) {}
     }

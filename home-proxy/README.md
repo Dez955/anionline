@@ -33,3 +33,19 @@ Notes:
 - Only the page requests go through the helper. The video itself still streams from Ashdi straight to the TV, so playback needs
   a player that can open Ashdi's HLS stream without extra browser permissions (Lampa's built-in player on Tizen and webOS normally
   does this natively). This has not been verified on a real Tizen/webOS TV.
+
+## On a hosted server instead (Koyeb, Render, Fly, a VPS)
+
+The same file also runs on a server reachable from the internet, with two differences: it must be protected by a secret, and AniTube
+has to accept that server's address (many cloud hosts are refused with HTTP 403, as Netlify is; the proxy then answers 502 with
+`HTTP 403` in its message, which the plugin shows).
+
+1. Make a long random secret, for example `openssl rand -hex 16`, and keep it private.
+2. Deploy this folder as a separate service with the secret in the `ACCESS_KEY` environment variable. The included `Dockerfile` listens
+   on port 8000 (override with `PORT`). On Koyeb: Create service → GitHub → `Dez955/anionline` → builder **Dockerfile**, Dockerfile
+   location `home-proxy/Dockerfile`, work directory `home-proxy`, port 8000 (HTTP), health check path `/health`, environment variable
+   `ACCESS_KEY`. Koyeb serves it over HTTPS automatically. A free plan may allow only one web service; a bot already running there
+   would have to share that slot or be moved.
+3. On the TV: **Settings → AniTube** → *Адреса проксі* `https://<your-service>.koyeb.app` and *Ключ проксі* = the secret.
+
+With `ACCESS_KEY` set every request except `/health` must carry `?key=<secret>`; without it only private-network clients are served.

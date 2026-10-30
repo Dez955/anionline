@@ -5,9 +5,14 @@
 //   PORT=9000 node server.mjs       # another port
 //
 // It only fetches three kinds of pages and keeps nothing: AniTube search results, an AniTube show's playlist, and an
-// Ashdi player page. Only clients on a private network (or localhost) are served. Needs Node.js 18 or newer.
+// Ashdi player page. Needs Node.js 18 or newer.
+//
+// Access: without ACCESS_KEY only clients on a private network (or localhost) are served. On a server reachable from the
+// internet set a secret, e.g.  ACCESS_KEY=long-random-text node server.mjs  and every request must carry  ?key=<that text>
+// (the plugin adds it from Settings -> AniTube). /health answers without a key so hosting platforms can check it.
 import http from 'node:http';
 import net from 'node:net';
+import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const SITE = 'https://anitube.in.ua';
@@ -111,14 +116,27 @@ async function embed(res, raw) {
   reply(res, 200, await body(await get(page.href)), 'text/html; charset=utf-8');
 }
 
-export function createProxy({ allowAnyClient = false } = {}) {
+function sameSecret(given, secret) {
+  const a = Buffer.from(String(given)), b = Buffer.from(String(secret));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// Behind a hosting platform's reverse proxy the socket address is the platform's, so the forwarded client address counts too.
+function clientAddress(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.socket.remoteAddress;
+}
+
+export function createProxy({ allowAnyClient = false, accessKey = '' } = {}) {
   return http.createServer(async (req, res) => {
     try {
       if (req.method === 'OPTIONS') return reply(res, 204, '', 'text/plain');
-      if (!allowAnyClient && !isPrivateAddress(req.socket.remoteAddress)) return json(res, { error: 'forbidden' }, 403);
       if (req.method !== 'GET') return json(res, { error: 'method_not_allowed' }, 405);
       const url = new URL(req.url, 'http://localhost');
       if (url.pathname === '/health') return json(res, { ok: true });
+      if (accessKey) {
+        if (!sameSecret(url.searchParams.get('key') || '', accessKey)) return json(res, { error: 'forbidden' }, 403);
+      } else if (!allowAnyClient && !isPrivateAddress(clientAddress(req))) return json(res, { error: 'forbidden' }, 403);
       if (url.pathname === '/search') return await search(res, (url.searchParams.get('q') || '').trim());
       if (url.pathname === '/playlist') return await playlist(res, url.searchParams.get('url') || '');
       if (url.pathname === '/embed') return await embed(res, url.searchParams.get('url') || '');
@@ -132,7 +150,8 @@ export function createProxy({ allowAnyClient = false } = {}) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 8787;
   const host = process.env.HOST || '0.0.0.0';
-  createProxy().listen(port, host, () => {
-    console.log('AniTube home proxy: http://' + host + ':' + port + '  (клієнти лише з локальної мережі; зупинити: Ctrl-C)');
+  const accessKey = process.env.ACCESS_KEY || '';
+  createProxy({ accessKey }).listen(port, host, () => {
+    console.log('AniTube proxy: http://' + host + ':' + port + (accessKey ? '  (потрібен ключ ACCESS_KEY)' : '  (клієнти лише з локальної мережі)') + '  зупинити: Ctrl-C');
   });
 }
