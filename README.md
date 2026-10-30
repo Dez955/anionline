@@ -23,9 +23,18 @@ Use the direct JavaScript URL in Lampa's plugin settings:
 
 Restart Lampa or refresh its plugins after the GitHub Pages update. The action is labeled **🟢 AniTube** in the plugin menu and on the details card.
 
+## Using it
+
+Open a card and choose **🟢 AniTube**. The plugin opens its own screen, built like Lampa's other online plugins:
+
+- The AniTube title is found by the card's names. If AniTube has several matches, they are listed; the choice is remembered per card. If nothing matches, use **Пошук** at the top and type the name as it appears on AniTube (often one word is enough); that query is remembered too.
+- Only the **Ashdi** player is offered, so there is no player step. The filter (press right, or move to the top) switches the voice/subtitle track (e.g. "Озвучення · QTV", "Субтитри · Рідний Голос") and, when there are several matches, the title.
+- Episodes show as "Серія N" with Lampa's watch-progress bar, and the cursor starts on the episode to continue with.
+- Starting an episode loads the whole list as the player's playlist, so the player's next/previous buttons switch episodes without leaving it. Back returns to the card.
+
 ## Limits
 
 - “Fresh” means every search requests the current AniTube page. The plugin does not continuously poll for new titles while nobody is using it.
 - On Android Lampa the plugin requests AniTube directly through Lampa's native request (no CORS limits, your own IP) and falls back to the Netlify function only if that fails. On other platforms it uses the function. The function currently gets HTTP 403 from AniTube, so on non-Android devices search will not work until that is resolved.
-- AniTube lists every episode as an embedded player page, not a direct video. Only **Ashdi** pages (`ashdi.vip/vod/<id>`) are supported: the plugin reads the HLS address stated on that page and plays it. Fenix, Tortuga and Moon need their player scripts and are not supported; DRM and separate subtitle extraction are not implemented.
+- AniTube lists every episode as an embedded player page, not a direct video. Only **Ashdi** pages (`ashdi.vip/vod/<id>`) are supported: the plugin reads the HLS address stated on that page and plays it. Fenix and Tortuga need their player scripts, and Moon answers HTTP 400 to anything but a browser iframe, so they are not supported (and not listed); DRM and separate subtitle extraction are not implemented.
 - AniTube may change its HTML, block requests, or change its playlist endpoint (it already moved the playlist container from `id` to `class` `playlists-ajax`). The TV and Lampa build still need an on-device check after deployment.
