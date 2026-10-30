@@ -60,3 +60,9 @@ AniTube refuses requests from Netlify and Koyeb (HTTP 403); whether it accepts C
 3. Worker → **Settings** → **Variables and Secrets** → **Add** → Type **Secret**, name `ACCESS_KEY`, value = a long random text (16+ characters) → **Deploy**.
 4. Test in a browser: `https://<name>.<account>.workers.dev/search?q=naruto&key=<secret>` should show an HTML page. `{"error": "HTTP 403"}` means AniTube refuses Cloudflare too.
 5. In Lampa: Settings → AniTube → *Адреса проксі* = `https://<name>.<account>.workers.dev`, *Ключ проксі* = the secret.
+
+**Ashdi geo-block.** Ashdi shows "Плеєр недоступний … в цій країні" to servers in some countries, and Cloudflare's servers can be among
+them (search and playlist from AniTube work, the player page does not). If so, add a *Text* variable `EMBED_URL` to the Worker
+(Settings → Variables and Secrets → Add → Type **Text**) set to the address of another proxy that Ashdi accepts, for example the bot's
+`https://<service>.koyeb.app/anitube`. The Worker then relays only `/embed` there using the same `ACCESS_KEY`, so both must hold the
+same secret. Search and playlist keep going through Cloudflare.

@@ -8,6 +8,10 @@
 //   GET /playlist?url=<page>&key=<key> one AniTube show's playlist (JSON)
 //   GET /embed?url=<page>&key=<key>    an Ashdi player page (https://ashdi.vip/vod/<id>)
 //
+// Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
+// from somewhere Ashdi accepts, add a plain-text variable EMBED_URL = the address of the bot's proxy, e.g.
+// https://<service>.koyeb.app/anitube : /embed is then relayed there with the same ACCESS_KEY. Search and playlist stay here.
+//
 // It fetches only those addresses, follows no redirects, stores nothing, and identifies itself honestly in User-Agent.
 // If a site refuses the request, the answer is HTTP 424 with {"error": "HTTP 403"} (or similar) so the reason is visible.
 
@@ -112,10 +116,28 @@ async function playlist(raw) {
   return json({ success: true, response: data.response });
 }
 
-async function embed(raw) {
+const GEO_BLOCK = 'Змініть країну перегляду';
+
+async function embed(raw, env) {
   const page = validPage(raw, 'ashdi.vip', /^\/vod\/\d+$/);
   if (!page) return json({ error: 'invalid_player_page' }, 400);
-  return html(await read(await get(page)));
+  const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
+  let text;
+  if (/^https:\/\/\S+$/.test(relay)) {
+    const target = relay + '/embed?url=' + encodeURIComponent(page) + '&key=' + encodeURIComponent(String(env.ACCESS_KEY).trim());
+    const response = await fetch(target, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT } });
+    if (!response.ok) {
+      let reason = 'HTTP ' + response.status;
+      try { reason = JSON.parse(await response.text()).error || reason; } catch { /* keep the status */ }
+      throw new UpstreamError('ретрансляція плеєра: ' + reason);
+    }
+    text = await response.text();
+  } else {
+    text = await read(await get(page));
+  }
+  if (text.length > MAX_BODY) throw new UpstreamError('завелика відповідь');
+  if (text.includes(GEO_BLOCK)) throw new UpstreamError('Ashdi не пускає країну цього сервера (див. EMBED_URL)');
+  return html(text);
 }
 
 export default {
@@ -130,7 +152,7 @@ export default {
     try {
       if (url.pathname === '/search') return await search((url.searchParams.get('q') || '').trim());
       if (url.pathname === '/playlist') return await playlist(url.searchParams.get('url') || '');
-      if (url.pathname === '/embed') return await embed(url.searchParams.get('url') || '');
+      if (url.pathname === '/embed') return await embed(url.searchParams.get('url') || '', env);
       return json({ error: 'not_found' }, 404);
     } catch (error) {
       const message = error instanceof UpstreamError ? error.message : (error && error.name) || 'upstream_error';

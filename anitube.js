@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.6.2';
+    var VERSION = '0.6.3';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
 
     function absolute(value, base) {
@@ -151,6 +151,7 @@
             var match = String(html).match(/\bfile\s*:\s*(["'])(https:\/\/ashdi\.vip\/[^"']+?\.m3u8[^"']*)\1/i);
             var stream = match && absolute(match[2], url);
             if (stream && new URL(stream).hostname === 'ashdi.vip' && media(stream)) success(stream);
+            else if (String(html).indexOf('Змініть країну перегляду') !== -1) fail('Ashdi не пускає країну цього сервера');
             else fail('на сторінці плеєра немає посилання на відео');
         }
         direct(url, {dataType: 'text', headers: {'Referer': HOME}}, function (html) {
