@@ -49,3 +49,14 @@ has to accept that server's address (many cloud hosts are refused with HTTP 403,
 3. On the TV: **Settings → AniTube** → *Адреса проксі* `https://<your-service>.koyeb.app` and *Ключ проксі* = the secret.
 
 With `ACCESS_KEY` set every request except `/health` must carry `?key=<secret>`; without it only private-network clients are served.
+
+## On Cloudflare Workers (free)
+
+[`cloudflare-worker.js`](cloudflare-worker.js) is the same helper as a Cloudflare Worker, for a free account and no server to keep.
+AniTube refuses requests from Netlify and Koyeb (HTTP 403); whether it accepts Cloudflare's network is only known by trying.
+
+1. Cloudflare dashboard → **Workers & Pages** → **Create** → **Create Worker** → name it (e.g. `anitube-proxy`) → **Deploy** → **Edit code**.
+2. Replace the sample code with the whole of `cloudflare-worker.js` and **Deploy**.
+3. Worker → **Settings** → **Variables and Secrets** → **Add** → Type **Secret**, name `ACCESS_KEY`, value = a long random text (16+ characters) → **Deploy**.
+4. Test in a browser: `https://<name>.<account>.workers.dev/search?q=naruto&key=<secret>` should show an HTML page. `{"error": "HTTP 403"}` means AniTube refuses Cloudflare too.
+5. In Lampa: Settings → AniTube → *Адреса проксі* = `https://<name>.<account>.workers.dev`, *Ключ проксі* = the secret.
