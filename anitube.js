@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.5.1';
+    var VERSION = '0.5.2';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
 
     function absolute(value, base) {
@@ -28,8 +28,11 @@
             var titled = card.querySelector('.title2 a[href]');
             var link = titled || (heading && (heading.querySelector('a[href]') || (heading.closest && heading.closest('a[href]')))) || card.querySelector('a[href]');
             var url = link && absolute(link.getAttribute('href'), HOME);
-            var title = (titled ? text(titled) : '') || text(heading) || text(link);
-            title = title.replace(/\s+/g, ' ').trim();
+            // Never fall back to a link's own text first: on the mobile template that is the "Озв+Суб" badge.
+            var poster = card.querySelector('img[alt]');
+            var linkTitle = link && (link.getAttribute('title') || '').replace(/^Перегляд:\s*/i, '');
+            var title = (titled ? text(titled) : '') || text(heading) || (poster && poster.getAttribute('alt')) || linkTitle || text(link);
+            title = String(title || '').replace(/\s+/g, ' ').trim();
             if (!url || new URL(url).hostname !== 'anitube.in.ua' || !title || seen[url]) return null;
             seen[url] = true;
             var note = [text(card.querySelector('.short-meta')), text(card.querySelector('.up-series'))].map(function (part) { return part.replace(/\s+/g, ' ').trim(); }).filter(Boolean).join(' · ');
@@ -402,7 +405,7 @@
             var entry = entries[index];
             if (!entry || entry.loading) return;
             entry.loading = true;
-            Lampa.Noty.show('AniTube: готую серії…');
+            Lampa.Noty.show('AniTube v' + VERSION + ': готую серії…');
             // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
             // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
             // the rest stays lazy for Lampa's built-in player.
