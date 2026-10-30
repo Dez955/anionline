@@ -26,5 +26,6 @@ Restart Lampa or refresh its plugins after the GitHub Pages update. The action i
 ## Limits
 
 - “Fresh” means every search requests the current AniTube page. The plugin does not continuously poll for new titles while nobody is using it.
-- Playback works only when AniTube exposes a direct HTTPS media URL that Lampa supports. Embedded players, DRM, provider-specific scripts, and separate subtitle extraction are not implemented.
-- AniTube may change its HTML, block server requests, or change its playlist endpoint. The TV and Lampa build still need an on-device check after deployment.
+- On Android Lampa the plugin requests AniTube directly through Lampa's native request (no CORS limits, your own IP) and falls back to the Netlify function only if that fails. On other platforms it uses the function. The function currently gets HTTP 403 from AniTube, so on non-Android devices search will not work until that is resolved.
+- AniTube lists every episode as an embedded player page, not a direct video. Only **Ashdi** pages (`ashdi.vip/vod/<id>`) are supported: the plugin reads the HLS address stated on that page and plays it. Fenix, Tortuga and Moon need their player scripts and are not supported; DRM and separate subtitle extraction are not implemented.
+- AniTube may change its HTML, block requests, or change its playlist endpoint (it already moved the playlist container from `id` to `class` `playlists-ajax`). The TV and Lampa build still need an on-device check after deployment.

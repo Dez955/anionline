@@ -73,7 +73,7 @@ async function playlist(rawUrl) {
   const pageResponse = await getPage(article.href);
   if (pageResponse.status >= 300 && pageResponse.status < 400) throw new Error('AniTube перенаправив сторінку аніме');
   const html = await readBody(pageResponse);
-  const container = html.match(/<[^>]*\bid=["']playlists-ajax["'][^>]*>/i);
+  const container = html.match(/<[^<>]*\b(?:id|class)=["'][^"']*\bplaylists-ajax\b[^"']*["'][^<>]*>/i);
   const hash = html.match(/\bdle_login_hash\s*=\s*['"]([a-f\d]{16,128})['"]/i);
   if (!container || !hash) return json({ success: false, error: 'playlist_metadata_missing' }, 502);
 
