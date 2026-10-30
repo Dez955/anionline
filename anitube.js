@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.6.1';
+    var VERSION = '0.6.2';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
 
     function absolute(value, base) {
@@ -179,6 +179,11 @@
     function failureText(xhr, directReason) {
         var home = homeProxy();
         var status = xhr && xhr.status ? 'проксі: HTTP ' + xhr.status : 'проксі: помилка мережі';
+        // The helper explains upstream failures in its JSON body (e.g. {"error": "HTTP 403"} when AniTube refuses its address).
+        try {
+            var said = xhr && xhr.responseText && JSON.parse(xhr.responseText).error;
+            if (said) status += ' – ' + String(said).slice(0, 80);
+        } catch (e) {}
         var hint = '';
         if (!home && !(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'))) hint = ' На цьому пристрої потрібен домашній проксі: Налаштування → AniTube.';
         else if (home && /^http:/i.test(home) && window.location && window.location.protocol === 'https:') hint = ' Lampa відкрита через https, тож браузер блокує http-проксі.';
