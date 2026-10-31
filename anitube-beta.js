@@ -1,10 +1,11 @@
-/* AniTube for Lampa. Episode list screen modelled on Lampa's own online plugins. No provider scripts are executed. */
+/* AniTube for Lampa 1.0. Sources: AniTube, AnimeOn (through a public Lampa-plugin aggregator), uafix. Series page laid out like the UAKino plugin's.
+   No provider scripts are executed. */
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.10.2';
+    var VERSION = '1.0.0';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -349,7 +350,7 @@
             var episodes = ((chosen && chosen.episodes) || []).filter(function (e) { return e && e.number && e.ref && e.ref.episode_id; }).map(function (e) {
                 return {title: 'Серія ' + e.number, url: 'animeon:' + e.ref.episode_id, ref: e.ref, subtitles: true};
             });
-            return episodes.length ? {label: 'AnimeOn · ' + name.replace(/^\[Ashdi\]\s*/i, ''), episodes: episodes} : null;
+            return episodes.length ? {label: name.replace(/^\[Ashdi\]\s*/i, '').replace(/\s*\|\s*/g, ' · ').trim(), episodes: episodes} : null;
         }).filter(Boolean);
     }
     function animeonStream(ref, wantSubtitles, success, failure) {
@@ -838,7 +839,7 @@
         this.useSeason = function (number, fresh) {
             season = number;
             voices = [{
-                label: 'uafix · Українська',
+                label: 'Українська',
                 episodes: seasons[number].map(function (episode) { return {title: episode.number ? 'Серія ' + episode.number : 'Фільм', url: episode.url}; })
             }];
             voiceIndex = 0;
@@ -1014,7 +1015,7 @@
             type: 'video',
             version: VERSION,
             name: '🟢 AniTube',
-            description: 'Озвучення, субтитри та серії з AniTube',
+            description: 'Озвучення, субтитри та серії з AniTube, AnimeOn і uafix',
             onContextMenu: function () {
                 return {name: '🟢 AniTube', description: 'Актуальний пошук на anitube.in.ua'};
             },
