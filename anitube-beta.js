@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.10.0';
+    var VERSION = '0.10.2';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -48,10 +48,25 @@
     }
     function sources(html, base) {
         var doc = page(html), rows = list(doc, '.playlists-lists > .playlists-items');
-        if (rows.length < 3) return [];
-        var modes = list(rows[0], 'li[data-id]'), variants = list(rows[1], 'li[data-id]');
-        var players = list(rows[2], 'li[data-id]'), episodes = list(doc, '.playlists-videos li[data-file][data-id]');
+        if (rows.length < 2) return [];
+        var episodes = list(doc, '.playlists-videos li[data-file][data-id]');
         var result = [];
+        // Some shows have no row of voice teams: only "озвучення / субтитри" and then the players (ids "0_0" and "0_0_0").
+        if (rows.length === 2) {
+            list(rows[0], 'li[data-id]').forEach(function (mode) {
+                var mid = mode.getAttribute('data-id');
+                list(rows[1], 'li[data-id]').filter(function (p) { return p.getAttribute('data-id').indexOf(mid + '_') === 0; }).forEach(function (player) {
+                    var pid = player.getAttribute('data-id');
+                    var eps = episodes.filter(function (e) { return e.getAttribute('data-id') === pid; }).map(function (e) {
+                        return { title: text(e), url: absolute(e.getAttribute('data-file'), base) };
+                    }).filter(function (e) { return e.title && e.url; });
+                    if (eps.length) result.push({ mode: text(mode), variant: '', player: text(player), episodes: eps });
+                });
+            });
+            return result;
+        }
+        var modes = list(rows[0], 'li[data-id]'), variants = list(rows[1], 'li[data-id]');
+        var players = list(rows[2], 'li[data-id]');
         modes.forEach(function (mode) {
             var mid = mode.getAttribute('data-id');
             variants.filter(function (v) { return v.getAttribute('data-id').indexOf(mid + '_') === 0; }).forEach(function (variant) {
@@ -159,11 +174,23 @@
             return page.protocol === 'https:' && page.hostname === 'ashdi.vip' && !page.port && /^\/vod\/\d+$/.test(page.pathname);
         } catch (e) { return false; }
     }
+    // Player pages list soft subtitles as subtitle:"[Українські]https://ashdi.vip/player/subtitle/297051_ua.vtt" (several separated by commas).
+    // Only .vtt/.srt files on the player's own host are taken. The result is what Lampa's player expects: [{label, url}].
+    function playerSubtitles(html, host) {
+        var match = String(html).match(/\bsubtitle\s*:\s*(["'])(.*?)\1/);
+        if (!match || !match[2]) return [];
+        return match[2].split(',').map(function (part) {
+            var item = part.match(/^\s*\[([^\]]+)\]\s*(https:\/\/\S+?)\s*$/);
+            var address = item && absolute(item[2], 'https://' + host + '/');
+            if (!address || new URL(address).hostname !== host || !/\.(vtt|srt)(?:[?#]|$)/i.test(address)) return null;
+            return {label: item[1].trim(), url: address};
+        }).filter(Boolean);
+    }
     function ashdiStream(url, success, failure) {
         function read(html, fail) {
             var match = String(html).match(/\bfile\s*:\s*(["'])(https:\/\/ashdi\.vip\/[^"']+?\.m3u8[^"']*)\1/i);
             var stream = match && absolute(match[2], url);
-            if (stream && new URL(stream).hostname === 'ashdi.vip' && media(stream)) success(stream);
+            if (stream && new URL(stream).hostname === 'ashdi.vip' && media(stream)) success(stream, playerSubtitles(html, 'ashdi.vip'));
             else if (String(html).indexOf('Змініть країну перегляду') !== -1) fail('Ashdi не пускає країну цього сервера');
             else fail('на сторінці плеєра немає посилання на відео');
         }
@@ -266,7 +293,7 @@
         function read(html) {
             var match = String(html).match(/\bfile\s*:\s*(["'])(https:\/\/zetvideo\.net\/[^"']+?\.m3u8[^"']*)\1/i);
             var stream = match && absolute(match[2], url);
-            if (stream && new URL(stream).hostname === 'zetvideo.net' && media(stream)) success(stream);
+            if (stream && new URL(stream).hostname === 'zetvideo.net' && media(stream)) success(stream, playerSubtitles(html, 'zetvideo.net'));
             else failure('на сторінці плеєра немає посилання на відео');
         }
         direct(url, {dataType: 'text', headers: {'Referer': UAFIX + '/'}}, read, function (e) {
@@ -320,16 +347,19 @@
             var seasons = voice.seasons || [];
             var chosen = seasons.filter(function (entry) { return Number(entry.title) === Number(season); })[0] || seasons[0];
             var episodes = ((chosen && chosen.episodes) || []).filter(function (e) { return e && e.number && e.ref && e.ref.episode_id; }).map(function (e) {
-                return {title: 'Серія ' + e.number, url: 'animeon:' + e.ref.episode_id, ref: e.ref};
+                return {title: 'Серія ' + e.number, url: 'animeon:' + e.ref.episode_id, ref: e.ref, subtitles: true};
             });
             return episodes.length ? {label: 'AnimeOn · ' + name.replace(/^\[Ashdi\]\s*/i, ''), episodes: episodes} : null;
         }).filter(Boolean);
     }
-    function animeonStream(ref, success, failure) {
+    function animeonStream(ref, wantSubtitles, success, failure) {
         animeonCall('/stream', null, {source: 'animeon', ref: ref}, function (data) {
             var stream = data && data.ok && data.streams && data.streams[0] && absolute(data.streams[0].url, 'https://ashdi.vip/');
-            if (stream && new URL(stream).hostname === 'ashdi.vip' && media(stream)) success(stream);
-            else failure((data && data.error) || 'немає потоку');
+            if (!(stream && new URL(stream).hostname === 'ashdi.vip' && media(stream))) return failure((data && data.error) || 'немає потоку');
+            var id = (stream.match(/_(\d{4,10})\/hls\//) || [])[1];
+            if (!wantSubtitles || !id) return success(stream, []);
+            // A missing subtitle file must never block the episode.
+            ashdiStream('https://ashdi.vip/vod/' + id, function (ignored, subtitles) { success(stream, subtitles || []); }, function () { success(stream, []); });
         }, function (xhr) { failure(xhr && xhr.status ? 'AnimeOn: HTTP ' + xhr.status : 'AnimeOn: сервер не відповідає'); });
     }
 
@@ -371,7 +401,7 @@
         return low.charAt(0).toUpperCase() + low.slice(1);
     }
     // "ОЗВУЧЕННЯ" + "QTV" -> "Озвучення · QTV"
-    function voiceLabel(source) { return sentence(source.mode) + ' · ' + source.variant; }
+    function voiceLabel(source) { return sentence(source.mode) + (source.variant ? ' · ' + source.variant : ''); }
     // Episode title as AniTube lists it: "12 серія" becomes "Серія 12"; "OVA 1", "Фільм" and the like stay as they are.
     // The number is also used as the watch-progress key, so it is read from the title only (stream file names do not match AniTube's numbering).
     function episodeInfo(raw) {
@@ -578,7 +608,7 @@
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title);
                 var hash = Lampa.Utils.hash(item.url + (source === 'uafix' ? '#s' + season : '') + ':' + (info.number || info.original));
-                return {url: episode.url, ref: episode.ref, info: info, title: info.label + ' · ' + item.title, timeline: Lampa.Timeline.view(hash)};
+                return {url: episode.url, ref: episode.ref, wantSubtitles: episode.subtitles, info: info, title: info.label + ' · ' + item.title, timeline: Lampa.Timeline.view(hash)};
             });
             var lastWatched = -1;
             entries.forEach(function (entry, index) { if (entry.timeline.percent > 0) lastWatched = index; });
@@ -822,11 +852,11 @@
         // 3. episode list with watch progress; the whole list becomes the player's playlist
         this.resolve = function (entry, success, failure) {
             if (entry.stream) return success(entry.stream);
-            if (source === 'uafix') return uafixStream(entry.url, function (stream) { success(entry.stream = stream); }, failure);
-            if (source === 'animeon') return animeonStream(entry.ref, function (stream) { success(entry.stream = stream); }, failure);
+            if (source === 'uafix') return uafixStream(entry.url, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
+            if (source === 'animeon') return animeonStream(entry.ref, entry.wantSubtitles, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (media(entry.url)) return success(entry.stream = entry.url);
             if (!ashdiPage(entry.url)) return failure('плеєр не підтримується');
-            ashdiStream(entry.url, function (stream) { success(entry.stream = stream); }, failure);
+            ashdiStream(entry.url, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
         };
 
         this.play = function (index) {
@@ -852,16 +882,17 @@
                 }
                 try { if (movie.id) Lampa.Favorite.add('history', movie, 100); } catch (e) {}
                 var first = {title: entry.title, url: entry.stream, timeline: entry.timeline};
+                if (entry.subtitles && entry.subtitles.length) first.subtitles = entry.subtitles;
                 var playlist = [];
                 entries.forEach(function (other, n) {
                     if (n === index) return playlist.push(first);
-                    if (other.stream) return playlist.push({title: other.title, url: other.stream, timeline: other.timeline});
+                    if (other.stream) return playlist.push({title: other.title, url: other.stream, timeline: other.timeline, subtitles: other.subtitles && other.subtitles.length ? other.subtitles : undefined});
                     if (n >= from && n <= to) return; // resolution failed, leave it out
                     var cell = {
                         title: other.title,
                         timeline: other.timeline,
                         url: function (call) {
-                            self.resolve(other, function (url) { cell.url = url; call(); }, function () { cell.url = ''; call(); });
+                            self.resolve(other, function (url) { cell.url = url; if (other.subtitles && other.subtitles.length) cell.subtitles = other.subtitles; call(); }, function () { cell.url = ''; call(); });
                         }
                     };
                     playlist.push(cell);
