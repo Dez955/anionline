@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.9.0';
+    var VERSION = '0.9.1';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -37,8 +37,12 @@
             title = String(title || '').replace(/\s+/g, ' ').trim();
             if (!url || new URL(url).hostname !== 'anitube.in.ua' || !title || seen[url]) return null;
             seen[url] = true;
-            var note = [text(card.querySelector('.short-meta')), text(card.querySelector('.up-series'))].map(function (part) { return part.replace(/\s+/g, ' ').trim(); }).filter(Boolean).join(' · ');
-            return { title: title, url: url, note: note };
+            // The year tells an old adaptation from a new one of the same name; the card's text carries it ("Рік виходу аніме: 2025").
+            var info = String(card.textContent || '').replace(/\s+/g, ' ');
+            var year = (info.match(/Рік виходу аніме:\s*(\d{4})/) || [])[1] || '';
+            var count = (info.match(/Серій:\s*(\d+(?:\s*з\s*\d+)?)/) || [])[1] || '';
+            var note = [year, count ? count + ' сер.' : '', text(card.querySelector('.short-meta')), text(card.querySelector('.up-series'))].map(function (part) { return part.replace(/\s+/g, ' ').trim(); }).filter(Boolean).join(' · ');
+            return { title: title, url: url, note: note, year: year };
         }).filter(Boolean);
     }
     function sources(html, base) {
@@ -376,9 +380,9 @@
         }
         function seasonLabel(result) {
             var number = seasonOf(result);
-            if (number) return 'Сезон ' + number;
             var name = String(result.title || '');
-            return name.length > 26 ? name.slice(0, 25) + '…' : name;
+            var label = number ? 'Сезон ' + number : (name.length > 26 ? name.slice(0, 25) + '…' : name);
+            return result.year ? label + ' · ' + result.year : label;
         }
         // AniTube keeps every season on its own page, so TMDB's season is only matched by the number in the title (or "1" for the first one).
         function tmdbSeason() {
@@ -484,7 +488,7 @@
                         });
                     }));
                 }
-            } else if (results.length > 1) {
+            } else if (results.length > 1 && item) {
                 addRow(results.map(function (result) {
                     var on = result === item;
                     return chip(seasonLabel(result), '', on, function () { if (!on) self.openTitle(result, true); });
@@ -533,9 +537,10 @@
                     var percent = Math.min(100, entry.timeline.percent || 0);
                     var date = t.air_date || '', runtime = t.runtime ? t.runtime + ' хв' : '';
                     var node = $('<div class="atp-ep selector"><div class="atp-ep__img"><div class="atp-ep__num"></div></div><div class="atp-ep__body"><div class="atp-ep__name"></div><div class="atp-ep__meta"></div><div class="atp-ep__descr"></div></div></div>');
-                    if (t.still_path) {
+                    var picture = t.still_path || movie.backdrop_path;
+                    if (picture) {
                         var img = $('<img loading="lazy">');
-                        img.attr('src', Lampa.TMDB.image('t/p/w300' + t.still_path));
+                        img.attr('src', Lampa.TMDB.image('t/p/w300' + picture));
                         node.find('.atp-ep__img').append(img);
                     }
                     node.find('.atp-ep__num').text(entry.info.number || '');
