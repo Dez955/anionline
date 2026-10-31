@@ -4,7 +4,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '0.9.1';
+    var VERSION = '0.9.2';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -254,7 +254,11 @@
             proxyUafix('episode', url, function (data) {
                 var player = data && uafixPlayer('<iframe src="' + data.player + '">');
                 if (player) success(player); else failure('на сторінці серії немає плеєра');
-            }, function (xhr) { failure(failureText(xhr, reason(e))); });
+            }, function (xhr) {
+                // Off Ukrainian addresses uafix shows only a trailer instead of the player, so the relay finds no player on the page.
+                if (xhr && /player_missing/.test(String(xhr.responseText || ''))) return failure('uafix показує плеєр лише на українських адресах, через проксі серія недоступна');
+                failure(failureText(xhr, reason(e)));
+            });
         });
     }
     function zetStream(url, success, failure) {
