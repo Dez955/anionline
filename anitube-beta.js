@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.2.0';
+    var VERSION = '1.3.0';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -469,6 +469,18 @@
         return episodes.length ? [{label: 'Російська озвучка', episodes: episodes}] : [];
     }
 
+    // A green round play icon drawn as SVG: the earlier green-circle emoji shows as an empty box on TVs whose font has no emoji.
+    var ICON = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" fill="#2ecc71"></circle><path d="M9.6 7.6v8.8l7.2-4.4z" fill="#ffffff"></path></svg>';
+    // Sources with a Russian voice-over are hidden until Settings -> AniTube -> "Показувати російські джерела" is switched on.
+    var RUSSIAN_SOURCES = {anilibria: true};
+    function russianEnabled() {
+        try {
+            var value = Lampa.Storage.field('anitube_russian');
+            return value === true || value === 'true';
+        } catch (e) { return false; }
+    }
+    function sourceAllowed(name) { return !RUSSIAN_SOURCES[name] || russianEnabled(); }
+
     function failureText(xhr, directReason) {
         var home = homeProxy();
         var status = xhr && xhr.status ? 'проксі: HTTP ' + xhr.status : 'проксі: помилка мережі';
@@ -539,7 +551,7 @@
         }
         var key = String(movie.id || movie.original_title || movie.title || '');
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
-        var source = SOURCE_NAMES[saved(key).source] ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
+        var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
         var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'anilibria'], extraTerms = [];
         var seasons = {}, season = 0;
         function active() { return Lampa.Activity.active() && Lampa.Activity.active().activity === self.activity; }
@@ -668,13 +680,13 @@
             first.push(chip('Джерело', SOURCE_NAMES[source] + ' ▾', false, function () {
                 Lampa.Select.show({
                     title: 'Джерело серій',
-                    items: [
+                    items: ([
                         {title: 'AniTube', subtitle: 'озвучення й субтитри, Ashdi', selected: source === 'anitube', value: 'anitube'},
                         {title: 'Makhno', subtitle: 'усі озвучення Ashdi, пошук за номером картки', selected: source === 'makhno', value: 'makhno'},
                         {title: 'AnimeOn', subtitle: 'багато озвучок, є новинки аніме', selected: source === 'animeon', value: 'animeon'},
                         {title: 'UAflix', subtitle: 'серіали й фільми, лише з України', selected: source === 'uafix', value: 'uafix'},
-                        {title: 'AniLibria', subtitle: 'аніме, російська озвучка, вищий бітрейт', selected: source === 'anilibria', value: 'anilibria'}
-                    ],
+                        {title: 'AniLibria', subtitle: 'аніме, російська озвучка, вищий бітрейт', selected: source === 'anilibria', value: 'anilibria', ru: true}
+                    ]).filter(function (entry) { return !entry.ru || russianEnabled(); }),
                     onBack: function () { Lampa.Controller.toggle('content'); },
                     onSelect: function (picked) {
                         Lampa.Controller.toggle('content');
@@ -810,6 +822,7 @@
         // When nothing is found and the source was not chosen by hand, the next one in ORDER is searched.
         this.nextSource = function () {
             var next = ORDER[ORDER.indexOf(source) + 1];
+            while (next && !sourceAllowed(next)) next = ORDER[ORDER.indexOf(next) + 1];
             if (manual || fellBack || !next) return false;
             source = next;
             return true;
@@ -1179,7 +1192,12 @@
     function addSettings() {
         try {
             if (!Lampa.SettingsApi || Lampa.SettingsApi.getComponent && Lampa.SettingsApi.getComponent('anitube')) return;
-            Lampa.SettingsApi.addComponent({component: 'anitube', icon: '<svg><use xlink:href="#sprite-settings"></use></svg>', name: 'AniTube'});
+            Lampa.SettingsApi.addComponent({component: 'anitube', icon: ICON, name: 'AniTube'});
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_russian', type: 'trigger', 'default': false},
+                field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria (російська озвучка, вищий бітрейт).'}
+            });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
@@ -1198,7 +1216,7 @@
         var movie = event.data && event.data.movie;
         if (!movie || root.find('.anitube-card-button').length) return;
 
-        var button = $('<div class="full-start__button selector view--anitube anitube-card-button"><span>🟢 AniTube</span></div>');
+        var button = $('<div class="full-start__button selector view--anitube anitube-card-button">' + ICON + '<span>AniTube</span></div>');
         button.on('hover:enter', function () { open(movie); });
 
         // Match established Lampa online plugins: attach to the card's torrent button.
@@ -1222,10 +1240,10 @@
         Lampa.Manifest.plugins = {
             type: 'video',
             version: VERSION,
-            name: '🟢 AniTube',
+            name: 'AniTube',
             description: 'Озвучення, субтитри та серії з AniTube, AnimeOn і uafix',
             onContextMenu: function () {
-                return {name: '🟢 AniTube', description: 'Актуальний пошук на anitube.in.ua'};
+                return {name: 'AniTube', description: 'Актуальний пошук на anitube.in.ua'};
             },
             onContextLauch: function (movie) {
                 open(movie);
