@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.3.0';
+    var VERSION = '1.3.1';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -449,6 +449,33 @@
     function anilibriaCall(path, success, failure) {
         $.ajax({url: ANILIBRIA_API + path, dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
     }
+    // AniLibria's search is fuzzy: it returns releases that merely share a letter or a short word with the query, and it
+    // names anime by their romaji ("Sousou no Frieren"). So several words of the card's names are searched and every release
+    // is kept only when its own names really share a distinctive word with the card's.
+    var WORD_STOP = {the: 1, and: 1, of: 1, season: 1, movie: 1, story: 1, part: 1, special: 1, film: 1, that: 1, with: 1, from: 1, into: 1, your: 1};
+    function nameWords(value) {
+        var folded = String(value || '').toLowerCase().replace(/[іїє]/g, function (c) { return c === 'і' || c === 'ї' ? 'и' : 'е'; }).replace(/ґ/g, 'г').replace(/ё/g, 'е').replace(/ы/g, 'и');
+        return folded.split(/[^a-zа-я0-9]+/).filter(function (w) { return w.length >= 4 && !WORD_STOP[w]; });
+    }
+    function sameWord(a, b) {
+        if (a === b) return true;
+        return a.length >= 5 && b.length >= 5 && a.slice(0, 5) === b.slice(0, 5);
+    }
+    // Each name of the release (Russian, romaji, alternative) is judged on its own: at least half of its distinctive words must
+    // be words of the card's names, and either two of them match or one long word matches letter for letter ("exiled" ~ "exile"
+    // or a short common word such as "heavy" is a coincidence). The best name decides; 0 means "not this one".
+    function anilibriaScore(release, words) {
+        var name = release.name || {}, best = 0;
+        [name.main, name.english, name.alternative].forEach(function (value) {
+            var own = nameWords(value);
+            if (!own.length) return;
+            var hits = own.filter(function (o) { return words.some(function (w) { return sameWord(o, w); }); });
+            var exact = hits.some(function (o) { return o.length >= 6 && words.indexOf(o) >= 0; });
+            var coverage = hits.length / own.length;
+            if (coverage >= 0.5 && (hits.length >= 2 || exact)) best = Math.max(best, coverage * 10 + hits.length);
+        });
+        return best;
+    }
     function anilibriaCatalog(data) {
         return (Array.isArray(data) ? data : []).map(function (release) {
             var name = (release && release.name) || {};
@@ -798,7 +825,7 @@
         this.search = function (queryIndex) {
             var queries = manual ? [manual] : orderTerms(unique(searchTerms(movie).concat(extraTerms)));
             if (source === 'makhno') return this.searchMakhno(queries);
-            if (source === 'anilibria') return this.searchAnilibria(queries, queryIndex);
+            if (source === 'anilibria') return this.searchAnilibria(queries);
             if (source === 'uafix') return this.searchUafix(queries, queryIndex);
             if (source === 'animeon') return this.searchAnimeon(queries);
             if (queryIndex >= queries.length) {
@@ -828,20 +855,35 @@
             return true;
         };
 
-        this.searchAnilibria = function (queries, queryIndex) {
-            if (queryIndex >= queries.length) {
-                if (this.nextSource()) return this.search(0);
-                return this.empty('AniLibria: за ' + (manual ? 'запитом «' + manual + '»' : 'назвою цієї картки') + ' нічого не знайдено (шукає за російською чи англійською назвою). Спробуй інше слово через «Пошук».');
+        this.searchAnilibria = function (queries) {
+            // A name typed by hand is trusted as it is; the card's own names are checked against what comes back.
+            var words = manual ? [] : unique(queries.reduce(function (all, q) { return all.concat(nameWords(q)); }, []));
+            var plan = manual ? [manual] : unique(queries.concat(words.filter(function (w) { return w.length >= 5; }))).slice(0, 8);
+            var pending = plan.length, merged = {}, order = [], failed = 0;
+            function done() {
+                if (closed) return;
+                var year = parseInt(String(movie.release_date || movie.first_air_date || '').slice(0, 4), 10) || 0;
+                var ranked = order.map(function (release) {
+                    return {release: release, score: manual ? 1 : anilibriaScore(release, words)};
+                }).filter(function (entry) { return entry.score > 0; }).sort(function (x, y) {
+                    return (y.score - x.score) || (Math.abs((x.release.year || 0) - year) - Math.abs((y.release.year || 0) - year));
+                }).map(function (entry) { return entry.release; });
+                var found = anilibriaCatalog(ranked);
+                if (found.length) return self.found(found, queries);
+                if (self.nextSource()) return self.search(0);
+                if (failed === plan.length) return self.empty('AniLibria: сервер не відповів.');
+                self.empty('AniLibria: ' + (manual ? 'за запитом «' + manual + '»' : 'у цього тайтлу') + ' нічого схожого не знайдено. AniLibria називає аніме за ромадзі чи російською; спробуй таку назву через «Пошук».');
             }
-            anilibriaCall('/app/search/releases?query=' + encodeURIComponent(queries[queryIndex]), function (data) {
-                if (closed) return;
-                var found = anilibriaCatalog(data);
-                if (!found.length) return self.searchAnilibria(queries, queryIndex + 1);
-                self.found(found, queries);
-            }, function (xhr) {
-                if (closed) return;
-                if (queryIndex + 1 < queries.length) return self.searchAnilibria(queries, queryIndex + 1);
-                self.empty('AniLibria: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+            plan.forEach(function (query) {
+                anilibriaCall('/app/search/releases?query=' + encodeURIComponent(query), function (data) {
+                    (Array.isArray(data) ? data : []).forEach(function (release) {
+                        if (release && !merged[release.id]) { merged[release.id] = true; order.push(release); }
+                    });
+                    if (--pending === 0) done();
+                }, function () {
+                    failed++;
+                    if (--pending === 0) done();
+                });
             });
         };
 
