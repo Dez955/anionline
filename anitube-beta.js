@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.7.1';
+    var VERSION = '1.7.2';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -786,6 +786,8 @@
             var meta = [];
             if (voice) meta.push(voice.episodes.length + ' ' + plural(voice.episodes.length, 'серія', 'серії', 'серій'));
             if (results.length > 1) meta.push(results.length + ' ' + plural(results.length, 'варіант', 'варіанти', 'варіантів') + ' на ' + SOURCE_NAMES[source]);
+            // For tracing "the page shows one anime and the player plays another": the id of the opened release/title is printed on the page.
+            if (item && item.ref && item.ref.id) meta.push('№ ' + item.ref.id);
             head.find('.atp__meta').text(meta.join(' · '));
             body.append(head);
 
@@ -1260,7 +1262,7 @@
             var entry = entries[index];
             if (!entry || entry.loading) return;
             entry.loading = true;
-            Lampa.Noty.show('AniTube v' + VERSION + ': готую серії…');
+            Lampa.Noty.show('AniTube v' + VERSION + ': ' + ((item && item.title) || '') + ' · ' + entry.info.label + '…');
             // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
             // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
             // the rest stays lazy for Lampa's built-in player.

@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.2.0';
+    var VERSION = '1.7.2';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -340,7 +340,7 @@
             var title = String(item.title || '').replace(/\s+/g, ' ').trim();
             if (!title) return null;
             var year = String(item.year || '');
-            return {title: title, url: url, note: [year, item.title_en].filter(Boolean).join(' · '), year: year, ref: {id: ref.id, season: ref.season || 1}};
+            return {title: title, names: [title, item.title_en], url: url, note: [year, item.title_en].filter(Boolean).join(' · '), year: year, ref: {id: ref.id, season: ref.season || 1}};
         }).filter(Boolean);
     }
     // Only voices that come as an Ashdi player are kept, the one player this plugin can play. "[Ashdi] Рідний Голос" becomes "Рідний Голос".
@@ -449,13 +449,74 @@
     function anilibriaCall(path, success, failure) {
         $.ajax({url: ANILIBRIA_API + path, dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
     }
+    // AniLibria's search is fuzzy: it returns releases that merely share a letter or a short word with the query, and it
+    // names anime by their romaji ("Sousou no Frieren"). So several words of the card's names are searched and every release
+    // is kept only when its own names really share a distinctive word with the card's.
+    var WORD_STOP = {the: 1, and: 1, of: 1, season: 1, movie: 1, story: 1, part: 1, special: 1, film: 1, that: 1, with: 1, from: 1, into: 1, your: 1};
+    function nameWords(value) {
+        var folded = String(value || '').toLowerCase().replace(/[іїє]/g, function (c) { return c === 'і' || c === 'ї' ? 'и' : 'е'; }).replace(/ґ/g, 'г').replace(/ё/g, 'е').replace(/ы/g, 'и');
+        // each word once, and no bare numbers (a year like "(2011)" in a title must not count as a shared word)
+        return unique(folded.split(/[^a-zа-я0-9]+/).filter(function (w) { return w.length >= 4 && !WORD_STOP[w] && !/^\d+$/.test(w); }));
+    }
+    function sameWord(a, b) {
+        if (a === b) return true;
+        // the same word with a different ending ("титанів" ~ "титанов"), not a longer word that merely starts the same way
+        return a.length >= 5 && b.length >= 5 && Math.abs(a.length - b.length) <= 2 && a.slice(0, 5) === b.slice(0, 5);
+    }
+    // A candidate (its list of names) is compared name by name with each of the card's names (`cards` is a list of word lists). They must
+    // share at least half of the words on BOTH sides, and either two words or one very long word; a card with a one-word name also
+    // accepts a short candidate that has the word ("Naruto" ~ "Naruto: Shippuuden"). One word of a long title ("knight", "tsuihou") is a
+    // coincidence, not a match. Returns 0 for "not this one"; a full match of two words scores 12.
+    function titleScore(values, cards) {
+        var best = 0;
+        values.forEach(function (value) {
+            var own = nameWords(value);
+            if (!own.length) return;
+            cards.forEach(function (card) {
+                var shared = card.filter(function (w) { return own.some(function (o) { return sameWord(o, w); }); });
+                if (!shared.length) return;
+                var cardCoverage = shared.length / card.length, ownCoverage = shared.length / own.length;
+                var ok = (cardCoverage >= 0.5 && ownCoverage >= 0.5 && (shared.length >= 2 || shared[0].length >= 8)) ||
+                    (card.length === 1 && shared[0].length >= 5 && own.length <= 4);
+                if (ok) best = Math.max(best, Math.min(cardCoverage, ownCoverage) * 10 + shared.length);
+                // One name entirely inside the other (the card's "Вигнаний важкоозброєний лицар" in a longer title with a subtitle) is a strong match too.
+                if ((shared.length === card.length && card.length >= 2) || (shared.length === own.length && own.length >= 2)) best = Math.max(best, 9 + shared.length);
+            });
+        });
+        return best;
+    }
+    function anilibriaScore(release, cards) {
+        var name = release.name || {};
+        return titleScore([name.main, name.english, name.alternative], cards);
+    }
+    // "2 сезон", "Season 2", "2nd Season", "... II", "... 2" at the end of a name -> 2; 0 when the name says nothing about a season.
+    function seasonNumberIn(value) {
+        var text = String(value || ''), m;
+        if ((m = text.match(/(\d+)\s*-?(?:й|ий)?\s*(?:сезон|season)|(?:сезон|season)\s*(\d+)/i))) return parseInt(m[1] || m[2], 10);
+        if ((m = text.match(/(\d+)(?:st|nd|rd|th)\s+season/i))) return parseInt(m[1], 10);
+        if ((m = text.match(/\s(II|III|IV|V|VI)\s*$/))) return {II: 2, III: 3, IV: 4, V: 5, VI: 6}[m[1]];
+        if ((m = text.match(/\s(\d{1,2})\s*$/)) && parseInt(m[1], 10) < 13) return parseInt(m[1], 10);
+        return 0;
+    }
+    // Words of a title without its season marker ("... 2", "2 сезон", "... II"): releases that share them belong to one show.
+    function baseWords(result) {
+        var text = String(result.title || '').replace(/(\d+)\s*-?(?:й|ий)?\s*(?:сезон|season)|(?:сезон|season)\s*\d+|\s(?:II|III|IV|V|VI)\s*$|\s\d{1,2}\s*$/gi, ' ');
+        return nameWords(text);
+    }
+    function sameFranchise(a, b) {
+        var x = baseWords(a), y = baseWords(b);
+        if (!x.length || !y.length) return false;
+        var shared = x.filter(function (w) { return y.some(function (o) { return sameWord(o, w); }); });
+        // most of the words of BOTH titles are shared, so a long title that merely contains the other's words is not the same show
+        return shared.length >= 1 && shared.length / Math.max(x.length, y.length) >= 0.6;
+    }
     function anilibriaCatalog(data) {
         return (Array.isArray(data) ? data : []).map(function (release) {
             var name = (release && release.name) || {};
             var title = String(name.main || name.english || '').replace(/\s+/g, ' ').trim();
             if (!release || !/^\d{1,8}$/.test(String(release.id)) || !title) return null;
             var year = release.year ? String(release.year) : '';
-            return {title: title, url: 'anilibria:' + release.id, note: [year, name.english].filter(Boolean).join(' · '), year: year, ref: {id: release.id}};
+            return {title: title, names: [name.main, name.english, name.alternative], url: 'anilibria:' + release.id, note: [year, name.english].filter(Boolean).join(' · '), year: year, ref: {id: release.id}};
         }).filter(Boolean);
     }
     // Only HLS addresses on the site's own video hosts are taken; 1080p when the release has it.
@@ -467,6 +528,43 @@
             return ok ? {title: 'Серія ' + e.ordinal, url: String(url)} : null;
         }).filter(Boolean);
         return episodes.length ? [{label: 'Російська озвучка', episodes: episodes}] : [];
+    }
+
+    // A green round play icon drawn as SVG: the earlier green-circle emoji shows as an empty box on TVs whose font has no emoji.
+    var ICON = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" fill="#2ecc71"></circle><path d="M9.6 7.6v8.8l7.2-4.4z" fill="#ffffff"></path></svg>';
+    // Sources with a Russian voice-over are hidden until Settings -> AniTube -> "Показувати російські джерела" is switched on.
+    var RUSSIAN_SOURCES = {anilibria: true};
+    function russianEnabled() {
+        try {
+            var value = Lampa.Storage.field('anitube_russian');
+            return value === true || value === 'true';
+        } catch (e) { return false; }
+    }
+    function sourceAllowed(name) { return !RUSSIAN_SOURCES[name] || russianEnabled(); }
+
+    // A card that only has a Japanese name: AniList (public, free, open to any origin) turns it into the romaji and English titles, which
+    // is how AniLibria and most Latin-script catalogues name anime. The hit must have the same native title, or the same year.
+    function anilistTitles(movie, done) {
+        var finished = false;
+        function finish(list) { if (!finished) { finished = true; done(list || []); } }
+        setTimeout(function () { finish([]); }, 4500);
+        try {
+            var original = String(movie.original_name || movie.original_title || '');
+            if (!/[぀-ヿ㐀-鿿]/.test(original)) return finish([]);
+            var year = parseInt(String(movie.first_air_date || movie.release_date || '').slice(0, 4), 10) || 0;
+            var flat = function (value) { return String(value || '').replace(/[\s　・!！?？~～\-]+/g, ''); };
+            $.ajax({
+                url: 'https://graphql.anilist.co', type: 'POST', contentType: 'application/json', dataType: 'json', timeout: 4000, cache: false,
+                data: JSON.stringify({query: 'query($s:String){Page(perPage:5){media(search:$s,type:ANIME,sort:SEARCH_MATCH){seasonYear title{romaji english native}}}}', variables: {s: original}}),
+                success: function (data) {
+                    var list = (data && data.data && data.data.Page && data.data.Page.media) || [];
+                    var hit = list.filter(function (m) { return m && m.title && flat(m.title.native) === flat(original); })[0] ||
+                        (list[0] && year && Math.abs((list[0].seasonYear || 0) - year) <= 1 ? list[0] : null);
+                    finish(hit ? [hit.title.romaji, hit.title.english].filter(Boolean) : []);
+                },
+                error: function () { finish([]); }
+            });
+        } catch (e) { finish([]); }
     }
 
     function failureText(xhr, directReason) {
@@ -490,16 +588,42 @@
     function searchTerms(movie) {
         var terms = [];
         [movie.title, movie.original_title, movie.name, movie.original_name].forEach(function (name) {
-            var clean = String(name || '').replace(/\s+/g, ' ').trim();
-            if (!clean) return;
-            if (clean.length > 60) {
-                var words = clean.split(' ');
-                clean = words.slice(0, 5).join(' ');
-                if (clean.length > 60) clean = clean.slice(0, 60).replace(/\s+\S*$/, '');
-            }
-            terms.push(clean);
+            var clean = shortName(name);
+            if (clean) terms.push(clean);
         });
         return unique(terms);
+    }
+    function shortName(value) {
+        var clean = String(value || '').replace(/\s+/g, ' ').trim();
+        if (clean.length > 60) {
+            var words = clean.split(' ');
+            clean = words.slice(0, 5).join(' ');
+            if (clean.length > 60) clean = clean.slice(0, 60).replace(/\s+\S*$/, '');
+        }
+        return clean;
+    }
+    // The card's other names that Lampa already carries from TMDB (English, romaji, other languages), best countries first.
+    function alternativeNames(movie) {
+        var data = movie && movie.alternative_titles;
+        var list = (data && (data.titles || data.results)) || [];
+        var rank = {US: 0, GB: 0, JP: 1};
+        return list.filter(function (entry) { return entry && entry.title; }).map(function (entry, index) {
+            var country = String(entry.iso_3166_1 || '').toUpperCase();
+            return {title: String(entry.title), order: (rank.hasOwnProperty(country) ? rank[country] : 2) * 1000 + index};
+        }).sort(function (x, y) { return x.order - y.order; }).map(function (entry) { return entry.title; });
+    }
+    // Names grouped by script, searched in this order and never all at once: [0] Ukrainian/Russian, [1] English/romaji, [2] Japanese etc.
+    // A source tries the first group, and only when that finds nothing moves to the next one.
+    function nameTiers(movie, extra) {
+        var tiers = [[], [], []], seen = {}, caps = [4, 5, 1];
+        [movie.title, movie.name, movie.original_title, movie.original_name].concat(extra || [], alternativeNames(movie)).forEach(function (raw) {
+            var name = shortName(raw), key = name.toLowerCase();
+            if (!name || seen[key]) return;
+            seen[key] = true;
+            var tier = /[а-яіїєґё]/i.test(name) ? 0 : /[a-z]/i.test(name) ? 1 : 2;
+            if (tiers[tier].length < caps[tier]) tiers[tier].push(name);
+        });
+        return tiers;
     }
     function normalize(value) { return String(value || '').toLowerCase().replace(/[^a-zа-яіїєґ0-9]+/g, ' ').trim(); }
     function sentence(value) {
@@ -539,8 +663,8 @@
         }
         var key = String(movie.id || movie.original_title || movie.title || '');
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
-        var source = SOURCE_NAMES[saved(key).source] ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
-        var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'anilibria'], extraTerms = [];
+        var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
+        var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
         var seasons = {}, season = 0;
         function active() { return Lampa.Activity.active() && Lampa.Activity.active().activity === self.activity; }
 
@@ -569,8 +693,21 @@
             rows.push(nodes.map(function (node) { return node[0]; }));
         }
         function seasonOf(result) {
-            var found = String(result.title || '').match(/(\d+)\s*(?:-?й\s*)?(?:сезон|season)|(?:сезон|season)\s*(\d+)/i);
-            return found ? parseInt(found[1] || found[2], 10) : 0;
+            return result.seasonNo || seasonNumberIn(result.title);
+        }
+        // Season numbers from the names ("2 сезон", "2nd Season", "... 2"). Within one show (same franchise), if some releases carry a number
+        // above 1 and the earliest one has none, that one is season 1.
+        function assignSeasons(list) {
+            list.forEach(function (r) {
+                r.seasonNo = [r.title].concat(r.names || []).reduce(function (n, value) { return n || seasonNumberIn(value); }, 0);
+            });
+            list.forEach(function (r) {
+                if (r.seasonNo) return;
+                var group = list.filter(function (x) { return x === r || sameFranchise(x, r); });
+                if (!group.some(function (x) { return x.seasonNo > 1; })) return;
+                var earliest = group.filter(function (x) { return !x.seasonNo; }).sort(function (x, y) { return (parseInt(x.year, 10) || 0) - (parseInt(y.year, 10) || 0); })[0];
+                if (earliest === r) r.seasonNo = 1;
+            });
         }
         function seasonLabel(result) {
             var number = seasonOf(result);
@@ -618,11 +755,16 @@
             html.append(scroll.render());
             this.activity.loader(true);
             manual = saved(key).query || '';
-            tmdbTitles(movie, function (extra) {
-                if (closed) return;
-                extraTerms = extra;
+            // Other names of the card from two places at once (TMDB translations, AniList for a Japanese-only card), then the search starts.
+            var gathered = [], waiting = 2;
+            function got(index, list) {
+                gathered[index] = list || [];
+                if (--waiting > 0 || closed) return;
+                extraTerms = unique((gathered[0] || []).concat(gathered[1] || []));
                 self.search(0);
-            });
+            }
+            tmdbTitles(movie, function (list) { got(0, list); });
+            anilistTitles(movie, function (list) { got(1, list); });
             return this.render();
         };
 
@@ -644,10 +786,15 @@
             var meta = [];
             if (voice) meta.push(voice.episodes.length + ' ' + plural(voice.episodes.length, 'серія', 'серії', 'серій'));
             if (results.length > 1) meta.push(results.length + ' ' + plural(results.length, 'варіант', 'варіанти', 'варіантів') + ' на ' + SOURCE_NAMES[source]);
+            // For tracing "the page shows one anime and the player plays another": the id of the opened release/title is printed on the page.
+            if (item && item.ref && item.ref.id) meta.push('№ ' + item.ref.id);
             head.find('.atp__meta').text(meta.join(' · '));
             body.append(head);
 
             var first = [];
+            // Releases of the same show are its seasons; everything else that was found is another candidate, kept out of the chip rows.
+            var related = item ? results.filter(function (r) { return r === item || sameFranchise(r, item); }) : [];
+            var others = item ? results.filter(function (r) { return related.indexOf(r) < 0; }) : [];
             if (voice) {
                 first.push(chip('Озвучення', voice.label + (voices.length > 1 ? ' ▾' : ''), false, function () {
                     if (voices.length < 2) return Lampa.Noty.show('Для цього тайтлу лише один варіант озвучення');
@@ -668,13 +815,13 @@
             first.push(chip('Джерело', SOURCE_NAMES[source] + ' ▾', false, function () {
                 Lampa.Select.show({
                     title: 'Джерело серій',
-                    items: [
+                    items: ([
                         {title: 'AniTube', subtitle: 'озвучення й субтитри, Ashdi', selected: source === 'anitube', value: 'anitube'},
                         {title: 'Makhno', subtitle: 'усі озвучення Ashdi, пошук за номером картки', selected: source === 'makhno', value: 'makhno'},
                         {title: 'AnimeOn', subtitle: 'багато озвучок, є новинки аніме', selected: source === 'animeon', value: 'animeon'},
                         {title: 'UAflix', subtitle: 'серіали й фільми, лише з України', selected: source === 'uafix', value: 'uafix'},
-                        {title: 'AniLibria', subtitle: 'аніме, російська озвучка, вищий бітрейт', selected: source === 'anilibria', value: 'anilibria'}
-                    ],
+                        {title: 'AniLibria', subtitle: 'аніме, російська озвучка, вищий бітрейт', selected: source === 'anilibria', value: 'anilibria', ru: true}
+                    ]).filter(function (entry) { return !entry.ru || russianEnabled(); }),
                     onBack: function () { Lampa.Controller.toggle('content'); },
                     onSelect: function (picked) {
                         Lampa.Controller.toggle('content');
@@ -682,6 +829,19 @@
                     }
                 });
             }));
+            if (others.length) {
+                first.push(chip('Інші варіанти', others.length + ' ▾', false, function () {
+                    Lampa.Select.show({
+                        title: 'Інші знайдені варіанти',
+                        items: others.map(function (r, index) { return {title: r.title, subtitle: r.note || '', index: index}; }),
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (picked) {
+                            Lampa.Controller.toggle('content');
+                            self.openTitle(others[picked.index]);
+                        }
+                    });
+                }));
+            }
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
@@ -696,8 +856,12 @@
                         });
                     }));
                 }
-            } else if (results.length > 1 && item) {
-                addRow(results.map(function (result) {
+            } else if (related.length > 1) {
+                // The seasons in their own order (season 1, 2, ...), then by year; not in the order of how well they matched.
+                seasonOrder = related.slice().sort(function (x, y) {
+                    return ((seasonOf(x) || 99) - (seasonOf(y) || 99)) || ((parseInt(x.year, 10) || 0) - (parseInt(y.year, 10) || 0));
+                });
+                addRow(seasonOrder.map(function (result) {
                     var on = result === item;
                     return chip(seasonLabel(result), '', on, function () { if (!on) self.openTitle(result, true); });
                 }));
@@ -769,10 +933,12 @@
         };
 
         this.ask = function () {
-            Lampa.Input.edit({free: true, title: 'Пошук на AniTube', nosave: true, value: manual}, function (value) {
+            Lampa.Input.edit({free: true, title: 'Пошук (порожнє поле скидає ручну назву)', nosave: true, value: manual}, function (value) {
                 Lampa.Controller.toggle('content');
                 value = String(value || '').trim();
-                if (!value) return;
+                // An empty entry confirmed with Enter clears the hand-typed name, so the search goes back to the card's own names.
+                if (!value && !manual) return;
+                if (!value) Lampa.Noty.show('Ручну назву скинуто, шукаю за назвами картки');
                 // AniTube often names a show differently from the card, so the title can be typed by hand (and is remembered).
                 manual = value;
                 remember(key, {query: manual, title: ''});
@@ -783,53 +949,99 @@
         };
 
         // 1. find the title on AniTube (the card's own names, then the original ones)
-        this.search = function (queryIndex) {
-            var queries = manual ? [manual] : orderTerms(unique(searchTerms(movie).concat(extraTerms)));
-            if (source === 'makhno') return this.searchMakhno(queries);
-            if (source === 'anilibria') return this.searchAnilibria(queries, queryIndex);
-            if (source === 'uafix') return this.searchUafix(queries, queryIndex);
-            if (source === 'animeon') return this.searchAnimeon(queries);
-            if (queryIndex >= queries.length) {
-                if (this.nextSource()) return this.search(0);
-                return this.empty(manual ? 'AniTube: за запитом «' + manual + '» нічого не знайдено. Спробуй інше слово через «Пошук» угорі.'
-                    : 'AniTube: за назвою цієї картки нічого не знайдено. Натисни «Пошук» угорі й введи назву так, як вона на AniTube (часто достатньо одного слова).');
+        // Every source is searched with the card's names in all languages at once; the results are merged and ranked by how closely their
+        // own names match the card's, and a clear winner is opened by itself. `spec`: label, fetch(query, ok, fail), strict (drop results
+        // that do not resemble the card), words (also ask distinctive words), failed(xhr, why), nothing.
+        this.searchMany = function (spec) {
+            var tiers = manual ? [[manual]] : nameTiers(movie, extraTerms);
+            var flat = tiers.reduce(function (all, tier) { return all.concat(tier); }, []);
+            var names = [];
+            for (var i = 0; i < 4; i++) [tiers[0], tiers[1]].forEach(function (tier) { if (tier && tier[i] && names.length < 5) names.push(tier[i]); });
+            if (!manual && names.length < 2 && tiers[2] && tiers[2][0]) names.push(tiers[2][0]);
+            if (!manual && spec.words) names = unique(names.concat(names.reduce(function (all, q) { return all.concat(nameWords(q).filter(function (w) { return w.length >= 5; })); }, []))).slice(0, 8);
+            var cards = manual ? [] : flat.map(nameWords).filter(function (c) { return c.length; });
+            var year = parseInt(String(movie.release_date || movie.first_air_date || '').slice(0, 4), 10) || 0;
+            var pending = names.length, seen = {}, list = [], failures = 0, lastFailure = [];
+            function finish() {
+                if (closed) return;
+                var scored = list.map(function (r) { return {r: r, score: manual ? 1 : titleScore(r.names || [r.title], cards)}; });
+                // Developer aid: window.anitube_debug = true in the console prints every candidate with its score.
+                try { if (window.anitube_debug) console.log('AniTube search', source, names, scored.map(function (e) { return e.score.toFixed(1) + ' ' + e.r.title + ' [' + (e.r.names || []).join(' | ') + ']'; })); } catch (e) {}
+                if (spec.strict) scored = scored.filter(function (e) { return e.score > 0; });
+                scored.sort(function (x, y) {
+                    return (y.score - x.score) || (Math.abs((parseInt(x.r.year, 10) || 0) - year) - Math.abs((parseInt(y.r.year, 10) || 0) - year));
+                });
+                if (scored.length) {
+                    var top = scored[0].score, next = scored[1] ? scored[1].score : 0;
+                    var clear = manual || (top >= 11 && next < top * 0.7);
+                    // A fuzzy source (AniLibria) never opens one of several results by itself: the right one is picked from the list.
+                    var auto = clear && (!spec.strict || scored.length === 1);
+                    return self.found(scored.map(function (e) { return e.r; }), flat, spec.strict && !auto, auto && scored.length > 1 ? scored[0].r : null);
+                }
+                if (self.nextSource()) return self.search(0);
+                if (failures === names.length) return self.empty(spec.failed(lastFailure[0], lastFailure[1]));
+                self.empty(spec.nothing(manual, list.length));
             }
-            fetchText('search', queries[queryIndex], function (html) {
-                if (closed) return;
-                var found = catalog(html);
-                if (!found.length) return self.search(queryIndex + 1);
-                self.found(found, queries);
-            }, function (xhr, why) {
-                if (closed) return;
-                // A 400 is about this particular query (e.g. too long); another name of the card may still work.
-                if (xhr && xhr.status === 400 && queryIndex + 1 < queries.length) return self.search(queryIndex + 1);
-                self.empty('AniTube: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.');
+            names.forEach(function (query) {
+                spec.fetch(query, function (items) {
+                    (items || []).forEach(function (r) { if (!seen[r.url]) { seen[r.url] = true; list.push(r); } });
+                    if (--pending === 0) finish();
+                }, function (xhr, why) {
+                    failures++;
+                    lastFailure = [xhr, why];
+                    if (--pending === 0) finish();
+                });
             });
+        };
+
+        this.search = function () {
+            var queries = manual ? [manual] : nameTiers(movie, extraTerms).reduce(function (all, tier) { return all.concat(tier); }, []);
+            lastQueries = queries;
+            var where = function (m) { return (m ? 'за запитом «' + m + '»' : 'за назвою цієї картки') + ' нічого не знайдено'; };
+            var imdb = String(movie.imdb_id || '');
+            var specs = {
+                anitube: {
+                    label: 'AniTube',
+                    fetch: function (q, ok, fail) { fetchText('search', q, function (html) { ok(catalog(html)); }, fail); },
+                    failed: function (xhr, why) { return 'AniTube: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.'; },
+                    nothing: function (m) { return m ? 'AniTube: за запитом «' + m + '» нічого не знайдено. Спробуй інше слово через «Пошук» угорі.'
+                        : 'AniTube: за назвою цієї картки нічого не знайдено. Натисни «Пошук» угорі й введи назву так, як вона на AniTube (часто достатньо одного слова).'; }
+                },
+                animeon: {
+                    label: 'AnimeOn',
+                    fetch: function (q, ok, fail) {
+                        animeonCall('/search', {sources: 'animeon', source: 'animeon', title: q, imdb_id: manual || !/^tt\d+$/.test(imdb) ? '' : imdb}, null, function (data) { ok(animeonCatalog(data)); }, fail);
+                    },
+                    failed: function (xhr) { return 'AnimeOn: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    nothing: function (m) { return 'AnimeOn: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
+                },
+                uafix: {
+                    label: 'UAflix',
+                    fetch: function (q, ok, fail) { uafixGet('search', q, function (html) { ok(uafixCatalog(html)); }, fail); },
+                    failed: function (xhr, why) { return 'UAflix: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.'; },
+                    nothing: function (m) { return 'UAflix: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
+                },
+                anilibria: {
+                    label: 'AniLibria', strict: true, words: true,
+                    fetch: function (q, ok, fail) { anilibriaCall('/app/search/releases?query=' + encodeURIComponent(q), function (data) { ok(anilibriaCatalog(data)); }, fail); },
+                    failed: function () { return 'AniLibria: сервер не відповів.'; },
+                    nothing: function (m, raw) {
+                        return 'AniLibria: ' + (m ? 'за запитом «' + m + '»' : 'у цього тайтлу') + (raw ? ' сервер повернув ' + raw + ', але нічого схожого' : ' сервер нічого не повернув, нічого не знайдено') +
+                            '. AniLibria називає аніме за ромадзі чи російською; спробуй таку назву через «Пошук».';
+                    }
+                }
+            };
+            if (source === 'makhno') return this.searchMakhno(queries);
+            this.searchMany(specs[source]);
         };
 
         // When nothing is found and the source was not chosen by hand, the next one in ORDER is searched.
         this.nextSource = function () {
             var next = ORDER[ORDER.indexOf(source) + 1];
+            while (next && !sourceAllowed(next)) next = ORDER[ORDER.indexOf(next) + 1];
             if (manual || fellBack || !next) return false;
             source = next;
             return true;
-        };
-
-        this.searchAnilibria = function (queries, queryIndex) {
-            if (queryIndex >= queries.length) {
-                if (this.nextSource()) return this.search(0);
-                return this.empty('AniLibria: за ' + (manual ? 'запитом «' + manual + '»' : 'назвою цієї картки') + ' нічого не знайдено (шукає за російською чи англійською назвою). Спробуй інше слово через «Пошук».');
-            }
-            anilibriaCall('/app/search/releases?query=' + encodeURIComponent(queries[queryIndex]), function (data) {
-                if (closed) return;
-                var found = anilibriaCatalog(data);
-                if (!found.length) return self.searchAnilibria(queries, queryIndex + 1);
-                self.found(found, queries);
-            }, function (xhr) {
-                if (closed) return;
-                if (queryIndex + 1 < queries.length) return self.searchAnilibria(queries, queryIndex + 1);
-                self.empty('AniLibria: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
-            });
         };
 
         // Makhno finds the Ashdi page by the card's TMDB number (and IMDb number when the card has one), not by name.
@@ -855,41 +1067,6 @@
             });
         };
 
-        this.searchAnimeon = function (queries) {
-            var imdb = String(movie.imdb_id || '');
-            animeonCall('/search', {
-                sources: 'animeon', source: 'animeon',
-                title: manual || queries[0] || '',
-                original_title: manual ? '' : (queries[1] || ''),
-                imdb_id: manual || !/^tt\d+$/.test(imdb) ? '' : imdb
-            }, null, function (data) {
-                if (closed) return;
-                var found = animeonCatalog(data);
-                if (found.length) return self.found(found, queries);
-                if (self.nextSource()) return self.search(0);
-                self.empty('AnimeOn: за ' + (manual ? 'запитом «' + manual + '»' : 'назвою цієї картки') + ' нічого не знайдено. Спробуй інше слово через «Пошук» або інше джерело.');
-            }, function (xhr) {
-                if (!closed) self.empty('AnimeOn: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
-            });
-        };
-
-        this.searchUafix = function (queries, queryIndex) {
-            if (queryIndex >= queries.length) {
-                if (this.nextSource()) return this.search(0);
-                return this.empty('UAflix: за ' + (manual ? 'запитом «' + manual + '»' : 'назвою цієї картки') + ' нічого не знайдено. Спробуй інше слово через «Пошук» або інше джерело.');
-            }
-            uafixGet('search', queries[queryIndex], function (html) {
-                if (closed) return;
-                var found = uafixCatalog(html);
-                if (!found.length) return self.searchUafix(queries, queryIndex + 1);
-                self.found(found, queries);
-            }, function (xhr, why) {
-                if (closed) return;
-                if (xhr && xhr.status === 400 && queryIndex + 1 < queries.length) return self.searchUafix(queries, queryIndex + 1);
-                self.empty('UAflix: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.');
-            });
-        };
-
         // Picking another source starts the search again from the card's own names.
         this.switchSource = function (name) {
             source = name;
@@ -901,17 +1078,26 @@
         };
 
         this.empty = function (message) {
-            if (source === 'anitube') message += ' Можна вибрати інше джерело (Makhno, AnimeOn, UAflix, AniLibria) у чипі «Джерело».';
+            if (/нічого/.test(message) && !manual && lastQueries.length) {
+                message += ' Шукали: ' + lastQueries.slice(0, 6).map(function (q) { return '«' + q + '»'; }).join(', ') + '.';
+                message += ' Назв із TMDB/AniList: ' + extraTerms.length + ', альтернативних у картці: ' + alternativeNames(movie).length + '.';
+            }
+            if (source === 'anitube') {
+                var others = ORDER.filter(function (name) { return name !== 'anitube' && sourceAllowed(name); }).map(function (name) { return SOURCE_NAMES[name]; });
+                message += ' Можна вибрати інше джерело (' + others.join(', ') + ') у чипі «Джерело».';
+            }
             this.draw(message);
             this.loading(false);
             this.start(true);
         };
 
-        this.found = function (found, queries) {
+        this.found = function (found, queries, confirm, pick) {
             results = found;
+            assignSeasons(results);
             var wanted = saved(key).title;
             var chosen = found.filter(function (r) { return r.url === wanted; })[0];
-            if (!chosen && found.length === 1) chosen = found[0];
+            if (!chosen && found.length === 1 && !confirm) chosen = found[0];
+            if (!chosen && pick) chosen = pick;
             if (!chosen) {
                 var exact = found.filter(function (r) { return queries.some(function (q) { return normalize(q) === normalize(r.title); }); });
                 if (exact.length === 1) chosen = exact[0];
@@ -925,8 +1111,12 @@
         };
 
         // 2. load the playlist and keep only Ashdi, the one player that gives a direct stream
+        // Every open of a title takes a new number; an answer that arrives for an older number is dropped, so a slow reply for one title can
+        // never fill the page of another one.
         this.openTitle = function (selectedTitle, keepFocusOnSeasons) {
             item = selectedTitle;
+            voices = []; seasons = {}; season = 0;
+            var mine = ++openSeq;
             remember(key, {title: item.url});
             this.loading(true);
             if (source === 'uafix') return this.openUafix();
@@ -934,7 +1124,7 @@
             if (source === 'makhno') return this.openMakhno();
             if (source === 'anilibria') return this.openAnilibria();
             fetchPlaylist(item.url, function (data) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 // On a dead end the chips stay usable, so another search result can be picked.
                 voices = [];
                 if (!data || !data.success || !data.response) return self.empty('AniTube: сайт не повернув список серій.');
@@ -955,15 +1145,16 @@
                 self.draw();
                 self.loading(false);
                 self.start(true);
-                if (keepFocusOnSeasons) focusAt(1, Math.max(0, results.indexOf(item)));
+                if (keepFocusOnSeasons) focusAt(1, Math.max(0, seasonOrder.indexOf(item)));
             }, function (xhr, why) {
-                if (!closed) self.empty('AniTube: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
+                if (!closed && mine === openSeq) self.empty('AniTube: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
             });
         };
 
         this.openAnilibria = function () {
+            var mine = openSeq;
             anilibriaCall('/anime/releases/' + encodeURIComponent(item.ref.id), function (data) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 voices = anilibriaVoices(data);
                 if (!voices.length) return self.empty('AniLibria: у цьому релізі немає серій для перегляду.');
                 voiceIndex = 0;
@@ -972,15 +1163,16 @@
                 self.loading(false);
                 self.start(true);
             }, function (xhr) {
-                if (!closed) self.empty('AniLibria: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+                if (!closed && mine === openSeq) self.empty('AniLibria: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
         };
 
         // The Ashdi page of the show: a serial page lists voices > seasons > episodes, a film page is one player.
         this.openMakhno = function () {
+            var mine = openSeq;
             var play = item.ref.play;
             ashdiHtml(play, function (html) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 if (/^\/serial\//.test(new URL(play).pathname)) seasons = makhnoSeasons(ashdiPlaylist(html));
                 else seasons = {1: [{label: 'Ashdi', episodes: [{title: 'Фільм', url: play, subs: []}]}]};
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
@@ -988,7 +1180,7 @@
                 var wanted = saved(key).season;
                 self.useMakhnoSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
             }, function (why) {
-                if (!closed) self.empty('Makhno: не вдалося прочитати сторінку Ashdi (' + reason(why) + ').');
+                if (!closed && mine === openSeq) self.empty('Makhno: не вдалося прочитати сторінку Ashdi (' + reason(why) + ').');
             });
         };
         this.useMakhnoSeason = function (number, fresh) {
@@ -1006,8 +1198,9 @@
 
         // One AnimeOn season: its Ashdi voices become the voices of the screen, in the order the server lists them.
         this.openAnimeon = function () {
+            var mine = openSeq;
             animeonCall('/content', null, {source: 'animeon', ref: item.ref, full: true}, function (data) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 voices = animeonVoices(data, item.ref.season);
                 if (!voices.length) return self.empty('AnimeOn: для цього тайтлу немає озвучень з плеєром Ashdi.');
                 var wantedVoice = saved(key).voice;
@@ -1018,14 +1211,15 @@
                 self.loading(false);
                 self.start(true);
             }, function (xhr) {
-                if (!closed) self.empty('AnimeOn: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+                if (!closed && mine === openSeq) self.empty('AnimeOn: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
         };
 
         // The show page of uafix lists every season; the episodes of one season become the single "voice" of the screen.
         this.openUafix = function () {
+            var mine = openSeq;
             uafixGet('page', item.url, function (html) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 seasons = uafixSeasons(html, item.url);
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (!numbers.length) {
@@ -1037,7 +1231,7 @@
                 var wanted = saved(key).season;
                 self.useSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
             }, function (xhr, why) {
-                if (!closed) self.empty('UAflix: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
+                if (!closed && mine === openSeq) self.empty('UAflix: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
             });
         };
         this.useSeason = function (number, fresh) {
@@ -1068,7 +1262,7 @@
             var entry = entries[index];
             if (!entry || entry.loading) return;
             entry.loading = true;
-            Lampa.Noty.show('AniTube v' + VERSION + ': готую серії…');
+            Lampa.Noty.show('AniTube v' + VERSION + ': ' + ((item && item.title) || '') + ' · ' + entry.info.label + '…');
             // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
             // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
             // the rest stays lazy for Lampa's built-in player.
@@ -1179,7 +1373,21 @@
     function addSettings() {
         try {
             if (!Lampa.SettingsApi || Lampa.SettingsApi.getComponent && Lampa.SettingsApi.getComponent('anitube')) return;
-            Lampa.SettingsApi.addComponent({component: 'anitube', icon: '<svg><use xlink:href="#sprite-settings"></use></svg>', name: 'AniTube'});
+            Lampa.SettingsApi.addComponent({component: 'anitube', icon: ICON, name: 'AniTube'});
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_russian', type: 'trigger', 'default': false},
+                field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria (російська озвучка, вищий бітрейт).'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_reset', type: 'button'},
+                field: {name: 'Забути запам\'ятовані вибори', description: 'Ручні назви пошуку, вибраний тайтл, озвучення й джерело для всіх карток. Пошук почнеться з нуля.'},
+                onChange: function () {
+                    Lampa.Storage.set('anitube_choice', {});
+                    Lampa.Noty.show('AniTube: збережені вибори скинуто');
+                }
+            });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
@@ -1198,7 +1406,7 @@
         var movie = event.data && event.data.movie;
         if (!movie || root.find('.anitube-card-button').length) return;
 
-        var button = $('<div class="full-start__button selector view--anitube anitube-card-button"><span>🟢 AniTube</span></div>');
+        var button = $('<div class="full-start__button selector view--anitube anitube-card-button">' + ICON + '<span>AniTube</span></div>');
         button.on('hover:enter', function () { open(movie); });
 
         // Match established Lampa online plugins: attach to the card's torrent button.
@@ -1222,10 +1430,10 @@
         Lampa.Manifest.plugins = {
             type: 'video',
             version: VERSION,
-            name: '🟢 AniTube',
+            name: 'AniTube',
             description: 'Озвучення, субтитри та серії з AniTube, AnimeOn і uafix',
             onContextMenu: function () {
-                return {name: '🟢 AniTube', description: 'Актуальний пошук на anitube.in.ua'};
+                return {name: 'AniTube', description: 'Актуальний пошук на anitube.in.ua'};
             },
             onContextLauch: function (movie) {
                 open(movie);

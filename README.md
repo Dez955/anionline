@@ -2,7 +2,7 @@
 
 A Lampa plugin that adds a **🟢 AniTube** action to a card. It opens a series page (voice, season and episode chips, like the UAKino plugin's) with Ukrainian voice-overs and subtitles, and plays the episode in Lampa's player with a playlist, so next/previous episode work.
 
-Current version: **1.2.0**.
+Current version: **1.7.2**.
 
 ## Add the plugin to Lampa
 
@@ -10,7 +10,7 @@ Settings → Extensions → Add plugin, and enter the direct JavaScript URL:
 
 `https://dez955.github.io/anionline/anitube.js`
 
-Restart Lampa or refresh its plugins after an update (Lampa caches plugins; adding `?v=<number>` to the address forces a reload). The previous version 0.7.0 is kept at `old/anitube-0.7.0.js`.
+Restart Lampa or refresh its plugins after an update (Lampa caches plugins; adding `?v=<number>` to the address forces a reload). Earlier versions are kept at `old/anitube-0.7.0.js` (AniTube only) and `old/anitube-1.2.0.js`.
 
 ## Sources
 
@@ -25,6 +25,14 @@ The **Джерело** chip on the page switches between them. While no source h
 Subtitles that come as a separate file on the player page are passed to Lampa's player, so they can be chosen there. Subtitles burned into the picture cannot be switched off. The player header shows the source's title instead of a card name written in the original (e.g. Japanese) letters; if the card has no translation, the Ukrainian or English name from TMDB is also used to search.
 
 Video quality is whatever the source offers: Ashdi, zetvideo and AnimeOn give 1080p at about 2 Mbit/s, so fast scenes can show blocks. The plugin cannot improve that.
+
+## Settings
+
+Settings → AniTube: **Показувати російські джерела** (off by default; turns on AniLibria), **Забути запам'ятовані вибори** (clears the hand-typed names, chosen titles, voices and sources remembered per card), and the optional proxy address and key.
+
+## How a title is found
+
+The card's names in all languages are searched at once (Ukrainian and Russian first, then English/romaji): the card's own names, its TMDB alternative titles and translations, and, for a card with only a Japanese name, the romaji/English titles from AniList. Results are ranked by how closely their names match, a clear winner opens by itself, otherwise a list is shown. An empty entry in **Пошук** clears a hand-typed name. Seasons of the same show appear as chips; other candidates are under **Інші варіанти**.
 
 ## Samsung Tizen / LG webOS
 
