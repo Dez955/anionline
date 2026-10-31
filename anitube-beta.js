@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.7.0';
+    var VERSION = '1.7.1';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -455,7 +455,8 @@
     var WORD_STOP = {the: 1, and: 1, of: 1, season: 1, movie: 1, story: 1, part: 1, special: 1, film: 1, that: 1, with: 1, from: 1, into: 1, your: 1};
     function nameWords(value) {
         var folded = String(value || '').toLowerCase().replace(/[іїє]/g, function (c) { return c === 'і' || c === 'ї' ? 'и' : 'е'; }).replace(/ґ/g, 'г').replace(/ё/g, 'е').replace(/ы/g, 'и');
-        return folded.split(/[^a-zа-я0-9]+/).filter(function (w) { return w.length >= 4 && !WORD_STOP[w]; });
+        // each word once, and no bare numbers (a year like "(2011)" in a title must not count as a shared word)
+        return unique(folded.split(/[^a-zа-я0-9]+/).filter(function (w) { return w.length >= 4 && !WORD_STOP[w] && !/^\d+$/.test(w); }));
     }
     function sameWord(a, b) {
         if (a === b) return true;
@@ -962,6 +963,8 @@
             function finish() {
                 if (closed) return;
                 var scored = list.map(function (r) { return {r: r, score: manual ? 1 : titleScore(r.names || [r.title], cards)}; });
+                // Developer aid: window.anitube_debug = true in the console prints every candidate with its score.
+                try { if (window.anitube_debug) console.log('AniTube search', source, names, scored.map(function (e) { return e.score.toFixed(1) + ' ' + e.r.title + ' [' + (e.r.names || []).join(' | ') + ']'; })); } catch (e) {}
                 if (spec.strict) scored = scored.filter(function (e) { return e.score > 0; });
                 scored.sort(function (x, y) {
                     return (y.score - x.score) || (Math.abs((parseInt(x.r.year, 10) || 0) - year) - Math.abs((parseInt(y.r.year, 10) || 0) - year));
