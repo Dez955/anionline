@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.5.1';
+    var VERSION = '1.6.0';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -497,6 +497,18 @@
         if ((m = text.match(/\s(\d{1,2})\s*$/)) && parseInt(m[1], 10) < 13) return parseInt(m[1], 10);
         return 0;
     }
+    // Words of a title without its season marker ("... 2", "2 сезон", "... II"): releases that share them belong to one show.
+    function baseWords(result) {
+        var text = String(result.title || '').replace(/(\d+)\s*-?(?:й|ий)?\s*(?:сезон|season)|(?:сезон|season)\s*\d+|\s(?:II|III|IV|V|VI)\s*$|\s\d{1,2}\s*$/gi, ' ');
+        return nameWords(text);
+    }
+    function sameFranchise(a, b) {
+        var x = baseWords(a), y = baseWords(b);
+        if (!x.length || !y.length) return false;
+        var shared = x.filter(function (w) { return y.some(function (o) { return sameWord(o, w); }); });
+        // most of the words of BOTH titles are shared, so a long title that merely contains the other's words is not the same show
+        return shared.length >= 1 && shared.length / Math.max(x.length, y.length) >= 0.6;
+    }
     function anilibriaCatalog(data) {
         return (Array.isArray(data) ? data : []).map(function (release) {
             var name = (release && release.name) || {};
@@ -626,7 +638,7 @@
         var key = String(movie.id || movie.original_title || movie.title || '');
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
-        var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'anilibria'], extraTerms = [], lastQueries = [];
+        var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
         var seasons = {}, season = 0;
         function active() { return Lampa.Activity.active() && Lampa.Activity.active().activity === self.activity; }
 
@@ -657,15 +669,19 @@
         function seasonOf(result) {
             return result.seasonNo || seasonNumberIn(result.title);
         }
-        // Season numbers from the names ("2 сезон", "2nd Season", "... 2"); when some releases carry a number and the earliest one does not, it is season 1.
+        // Season numbers from the names ("2 сезон", "2nd Season", "... 2"). Within one show (same franchise), if some releases carry a number
+        // above 1 and the earliest one has none, that one is season 1.
         function assignSeasons(list) {
             list.forEach(function (r) {
                 r.seasonNo = [r.title].concat(r.names || []).reduce(function (n, value) { return n || seasonNumberIn(value); }, 0);
             });
-            if (list.some(function (r) { return r.seasonNo > 1; })) {
-                var plain = list.filter(function (r) { return !r.seasonNo; }).sort(function (x, y) { return (parseInt(x.year, 10) || 0) - (parseInt(y.year, 10) || 0); });
-                if (plain.length) plain[0].seasonNo = 1;
-            }
+            list.forEach(function (r) {
+                if (r.seasonNo) return;
+                var group = list.filter(function (x) { return x === r || sameFranchise(x, r); });
+                if (!group.some(function (x) { return x.seasonNo > 1; })) return;
+                var earliest = group.filter(function (x) { return !x.seasonNo; }).sort(function (x, y) { return (parseInt(x.year, 10) || 0) - (parseInt(y.year, 10) || 0); })[0];
+                if (earliest === r) r.seasonNo = 1;
+            });
         }
         function seasonLabel(result) {
             var number = seasonOf(result);
@@ -743,6 +759,9 @@
             body.append(head);
 
             var first = [];
+            // Releases of the same show are its seasons; everything else that was found is another candidate, kept out of the chip rows.
+            var related = item ? results.filter(function (r) { return r === item || sameFranchise(r, item); }) : [];
+            var others = item ? results.filter(function (r) { return related.indexOf(r) < 0; }) : [];
             if (voice) {
                 first.push(chip('Озвучення', voice.label + (voices.length > 1 ? ' ▾' : ''), false, function () {
                     if (voices.length < 2) return Lampa.Noty.show('Для цього тайтлу лише один варіант озвучення');
@@ -777,6 +796,19 @@
                     }
                 });
             }));
+            if (others.length) {
+                first.push(chip('Інші варіанти', others.length + ' ▾', false, function () {
+                    Lampa.Select.show({
+                        title: 'Інші знайдені варіанти',
+                        items: others.map(function (r, index) { return {title: r.title, subtitle: r.note || '', index: index}; }),
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (picked) {
+                            Lampa.Controller.toggle('content');
+                            self.openTitle(others[picked.index]);
+                        }
+                    });
+                }));
+            }
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
@@ -791,11 +823,12 @@
                         });
                     }));
                 }
-            } else if (results.length > 1 && item) {
+            } else if (related.length > 1) {
                 // The seasons in their own order (season 1, 2, ...), then by year; not in the order of how well they matched.
-                addRow(results.slice().sort(function (x, y) {
+                seasonOrder = related.slice().sort(function (x, y) {
                     return ((seasonOf(x) || 99) - (seasonOf(y) || 99)) || ((parseInt(x.year, 10) || 0) - (parseInt(y.year, 10) || 0));
-                }).map(function (result) {
+                });
+                addRow(seasonOrder.map(function (result) {
                     var on = result === item;
                     return chip(seasonLabel(result), '', on, function () { if (!on) self.openTitle(result, true); });
                 }));
@@ -906,7 +939,9 @@
                 if (scored.length) {
                     var top = scored[0].score, next = scored[1] ? scored[1].score : 0;
                     var clear = manual || (top >= 11 && next < top * 0.7);
-                    return self.found(scored.map(function (e) { return e.r; }), flat, spec.strict && !clear, clear && scored.length > 1 ? scored[0].r : null);
+                    // A fuzzy source (AniLibria) never opens one of several results by itself: the right one is picked from the list.
+                    var auto = clear && (!spec.strict || scored.length === 1);
+                    return self.found(scored.map(function (e) { return e.r; }), flat, spec.strict && !auto, auto && scored.length > 1 ? scored[0].r : null);
                 }
                 if (self.nextSource()) return self.search(0);
                 if (failures === names.length) return self.empty(spec.failed(lastFailure[0], lastFailure[1]));
@@ -1035,8 +1070,12 @@
         };
 
         // 2. load the playlist and keep only Ashdi, the one player that gives a direct stream
+        // Every open of a title takes a new number; an answer that arrives for an older number is dropped, so a slow reply for one title can
+        // never fill the page of another one.
         this.openTitle = function (selectedTitle, keepFocusOnSeasons) {
             item = selectedTitle;
+            voices = []; seasons = {}; season = 0;
+            var mine = ++openSeq;
             remember(key, {title: item.url});
             this.loading(true);
             if (source === 'uafix') return this.openUafix();
@@ -1044,7 +1083,7 @@
             if (source === 'makhno') return this.openMakhno();
             if (source === 'anilibria') return this.openAnilibria();
             fetchPlaylist(item.url, function (data) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 // On a dead end the chips stay usable, so another search result can be picked.
                 voices = [];
                 if (!data || !data.success || !data.response) return self.empty('AniTube: сайт не повернув список серій.');
@@ -1065,15 +1104,16 @@
                 self.draw();
                 self.loading(false);
                 self.start(true);
-                if (keepFocusOnSeasons) focusAt(1, Math.max(0, results.indexOf(item)));
+                if (keepFocusOnSeasons) focusAt(1, Math.max(0, seasonOrder.indexOf(item)));
             }, function (xhr, why) {
-                if (!closed) self.empty('AniTube: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
+                if (!closed && mine === openSeq) self.empty('AniTube: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
             });
         };
 
         this.openAnilibria = function () {
+            var mine = openSeq;
             anilibriaCall('/anime/releases/' + encodeURIComponent(item.ref.id), function (data) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 voices = anilibriaVoices(data);
                 if (!voices.length) return self.empty('AniLibria: у цьому релізі немає серій для перегляду.');
                 voiceIndex = 0;
@@ -1082,15 +1122,16 @@
                 self.loading(false);
                 self.start(true);
             }, function (xhr) {
-                if (!closed) self.empty('AniLibria: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+                if (!closed && mine === openSeq) self.empty('AniLibria: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
         };
 
         // The Ashdi page of the show: a serial page lists voices > seasons > episodes, a film page is one player.
         this.openMakhno = function () {
+            var mine = openSeq;
             var play = item.ref.play;
             ashdiHtml(play, function (html) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 if (/^\/serial\//.test(new URL(play).pathname)) seasons = makhnoSeasons(ashdiPlaylist(html));
                 else seasons = {1: [{label: 'Ashdi', episodes: [{title: 'Фільм', url: play, subs: []}]}]};
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
@@ -1098,7 +1139,7 @@
                 var wanted = saved(key).season;
                 self.useMakhnoSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
             }, function (why) {
-                if (!closed) self.empty('Makhno: не вдалося прочитати сторінку Ashdi (' + reason(why) + ').');
+                if (!closed && mine === openSeq) self.empty('Makhno: не вдалося прочитати сторінку Ashdi (' + reason(why) + ').');
             });
         };
         this.useMakhnoSeason = function (number, fresh) {
@@ -1116,8 +1157,9 @@
 
         // One AnimeOn season: its Ashdi voices become the voices of the screen, in the order the server lists them.
         this.openAnimeon = function () {
+            var mine = openSeq;
             animeonCall('/content', null, {source: 'animeon', ref: item.ref, full: true}, function (data) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 voices = animeonVoices(data, item.ref.season);
                 if (!voices.length) return self.empty('AnimeOn: для цього тайтлу немає озвучень з плеєром Ashdi.');
                 var wantedVoice = saved(key).voice;
@@ -1128,14 +1170,15 @@
                 self.loading(false);
                 self.start(true);
             }, function (xhr) {
-                if (!closed) self.empty('AnimeOn: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+                if (!closed && mine === openSeq) self.empty('AnimeOn: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
         };
 
         // The show page of uafix lists every season; the episodes of one season become the single "voice" of the screen.
         this.openUafix = function () {
+            var mine = openSeq;
             uafixGet('page', item.url, function (html) {
-                if (closed) return;
+                if (closed || mine !== openSeq) return;
                 seasons = uafixSeasons(html, item.url);
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (!numbers.length) {
@@ -1147,7 +1190,7 @@
                 var wanted = saved(key).season;
                 self.useSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
             }, function (xhr, why) {
-                if (!closed) self.empty('UAflix: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
+                if (!closed && mine === openSeq) self.empty('UAflix: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
             });
         };
         this.useSeason = function (number, fresh) {
