@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.5.0';
+    var VERSION = '1.5.1';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix needs one page request per episode, so its window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -867,10 +867,12 @@
         };
 
         this.ask = function () {
-            Lampa.Input.edit({free: true, title: 'Пошук на AniTube', nosave: true, value: manual}, function (value) {
+            Lampa.Input.edit({free: true, title: 'Пошук (порожнє поле скидає ручну назву)', nosave: true, value: manual}, function (value) {
                 Lampa.Controller.toggle('content');
                 value = String(value || '').trim();
-                if (!value) return;
+                // An empty entry confirmed with Enter clears the hand-typed name, so the search goes back to the card's own names.
+                if (!value && !manual) return;
+                if (!value) Lampa.Noty.show('Ручну назву скинуто, шукаю за назвами картки');
                 // AniTube often names a show differently from the card, so the title can be typed by hand (and is remembered).
                 manual = value;
                 remember(key, {query: manual, title: ''});
@@ -1292,6 +1294,15 @@
                 component: 'anitube',
                 param: {name: 'anitube_russian', type: 'trigger', 'default': false},
                 field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria (російська озвучка, вищий бітрейт).'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_reset', type: 'button'},
+                field: {name: 'Забути запам\'ятовані вибори', description: 'Ручні назви пошуку, вибраний тайтл, озвучення й джерело для всіх карток. Пошук почнеться з нуля.'},
+                onChange: function () {
+                    Lampa.Storage.set('anitube_choice', {});
+                    Lampa.Noty.show('AniTube: збережені вибори скинуто');
+                }
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
