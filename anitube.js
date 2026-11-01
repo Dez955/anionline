@@ -5,10 +5,11 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.7.2';
+    var VERSION = '1.8.2';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
-    // uafix needs one page request per episode, so its window around the chosen episode is smaller.
+    // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
+    var DORAMA_AHEAD = 6, DORAMA_BEHIND = 1;
     var ANIMEON_AHEAD = 6, ANIMEON_BEHIND = 1;
 
     function absolute(value, base) {
@@ -128,6 +129,55 @@
         if (raw && typeof raw === 'object') raw = JSON.stringify(raw);
         return String(raw || 'без відповіді').slice(0, 140);
     }
+    // ---- Home box: an Android TV box in the same network (home-proxy/box-relay.mjs under Termux) ---------------------------
+    // The sites that show their players only to visitors from Ukraine (uafix, DoramaUA) refuse the Cloudflare Worker, and a Smart TV
+    // cannot read them itself. The box asks them from the home connection, which is an ordinary Ukrainian visitor.
+    var BOX_PORT = 8787;
+    var boxNote = '';
+    function boxAddress() {
+        var value = '';
+        try { value = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_box')) || '').trim().replace(/\/+$/, ''); } catch (e) {}
+        if (!value) return '';
+        if (!/^https?:\/\//i.test(value)) value = 'http://' + value;
+        if (!/^https?:\/\/[^\/\s?#]+$/i.test(value)) return '';
+        if (!/:\d+$/.test(value.replace(/^https?:\/\//i, ''))) value += ':' + BOX_PORT;
+        return value;
+    }
+    function boxRequest(path, params, dataType, success, failure) {
+        var base = boxAddress();
+        if (!base) return failure(null);
+        var query = Object.keys(params).filter(function (name) { return params[name] !== '' && params[name] != null; })
+            .map(function (name) { return name + '=' + encodeURIComponent(params[name]); }).concat('key=' + encodeURIComponent(DEFAULT_KEY)).join('&');
+        $.ajax({url: base + '/' + path + '?' + query, dataType: dataType, timeout: 25000, cache: false, success: success, error: failure});
+    }
+    // Why the box did not help, in words: its own explanation when it answered, otherwise a hint about the likely cause.
+    function boxReason(xhr) {
+        var base = boxAddress(), host = base.replace(/^https?:\/\//i, '');
+        try {
+            var said = xhr && xhr.responseText && JSON.parse(xhr.responseText).error;
+            if (said) return 'приставка ' + host + ': ' + String(said).slice(0, 120);
+        } catch (e) {}
+        if (xhr && xhr.status) return 'приставка ' + host + ': HTTP ' + xhr.status;
+        if (window.location && window.location.protocol === 'https:' && /^http:/i.test(base)) return 'приставка ' + host + ' недоступна: Lampa відкрита через https, тож браузер блокує http-адресу';
+        return 'приставка ' + host + ' не відповідає: перевір, що вона ввімкнена, в тій самій Wi-Fi і ретранслятор запущено';
+    }
+    function boxCheck() {
+        if (!boxAddress()) return Lampa.Noty.show('AniTube: адресу приставки не вказано (Налаштування → AniTube → Адреса приставки)', {time: 6000});
+        boxRequest('check', {}, 'json', function (data) {
+            var parts = ((data && data.results) || []).map(function (r) { return r.name + ': ' + (r.ok ? 'ок' : 'не працює (' + r.error + ')'); });
+            Lampa.Noty.show('Приставка ' + boxAddress().replace(/^https?:\/\//i, '') + ' відповіла. ' + (parts.join('; ') || 'без деталей'), {time: 10000});
+        }, function (xhr) { Lampa.Noty.show('AniTube: ' + boxReason(xhr), {time: 8000}); });
+    }
+    // Added to an error about a source that needs a Ukrainian address when the device can neither ask it itself nor use a box.
+    function boxHint() {
+        var android = !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'));
+        return boxAddress() || android ? '' : ' На Smart TV для цього джерела потрібна домашня приставка: Налаштування → AniTube → Адреса приставки.';
+    }
+    // The box is useful on a device with no native requests; Android Lampa asks the sites itself.
+    function doramaAvailable() {
+        return !!boxAddress() || !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'));
+    }
+
     // Lampa on Android can send native requests that are not limited by browser CORS rules.
     function direct(url, options, success, failure) {
         if (!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android') && Lampa.Reguest)) return failure('не Android');
@@ -256,10 +306,13 @@
         Object.keys(seasons).forEach(function (season) { seasons[season].sort(function (a, b) { return a.number - b.number; }); });
         return seasons;
     }
-    function uafixPlayer(html) {
-        var match = String(html).match(/<iframe\b[^>]*\bsrc=["'](https:\/\/(?:zetvideo\.net|ashdi\.vip)\/vod\/\d+)["']/i);
-        return match ? match[1] : '';
+    // Every player of an episode page in the site's order: "Плеєр 1" is the voice-over, "Плеєр 2 (Субтитри)" the original with subtitles.
+    function uafixPlayers(html) {
+        var found = [], pattern = /<iframe\b[^>]*\bsrc=["'](https:\/\/(?:zetvideo\.net|ashdi\.vip)\/vod\/\d+)["']/gi, match;
+        while ((match = pattern.exec(String(html)))) if (found.indexOf(match[1]) < 0) found.push(match[1]);
+        return found;
     }
+    function uafixPlayer(html) { return uafixPlayers(html)[0] || ''; }
     function zetPage(value) {
         try {
             var page = new URL(value);
@@ -267,8 +320,20 @@
         } catch (e) { return false; }
     }
     function proxyUafix(action, value, success, failure) {
-        $.ajax({url: homeUrl(homeProxy(), 'uf/' + action, action === 'search' ? 'q' : 'url', value), dataType: action === 'episode' ? 'json' : 'text',
-            timeout: 25000, cache: false, success: success, error: failure});
+        var type = action === 'episode' ? 'json' : 'text';
+        function viaWorker(onError) {
+            $.ajax({url: homeUrl(homeProxy(), 'uf/' + action, action === 'search' ? 'q' : 'url', value), dataType: type,
+                timeout: 25000, cache: false, success: success, error: onError || failure});
+        }
+        // The home box goes first: it asks uafix from a Ukrainian address, which the Worker cannot.
+        if (!boxAddress()) return viaWorker();
+        var params = {};
+        params[action === 'search' ? 'q' : 'url'] = value;
+        boxRequest('uf/' + action, params, type, function (data) { boxNote = ''; success(data); }, function (xhr) {
+            // The box's reason travels with the final failure itself (requests run side by side, so a shared variable would be overwritten).
+            var note = boxNote = boxReason(xhr);
+            viaWorker(function (xhr2, a, b) { try { xhr2.boxNote = note; } catch (e) {} failure(xhr2, a, b); });
+        });
     }
     function uafixGet(action, value, success, failure) {
         if (action !== 'search' && !uafixAnyPage(value)) return failure(null, 'некоректна адреса');
@@ -280,18 +345,52 @@
     function uafixEpisodePlayer(url, success, failure) {
         if (!uafixAnyPage(url)) return failure('некоректна адреса');
         direct(url, {dataType: 'text', headers: {'Referer': UAFIX + '/'}}, function (html) {
-            var player = uafixPlayer(html);
-            if (player) success(player); else failure('на сторінці серії немає плеєра');
+            var players = uafixPlayers(html);
+            if (players.length) success(players); else failure('на сторінці серії немає плеєра');
         }, function (e) {
             proxyUafix('episode', url, function (data) {
-                var player = data && uafixPlayer('<iframe src="' + data.player + '">');
-                if (player) success(player); else failure('на сторінці серії немає плеєра');
+                // The home box lists every player; the Worker and the bot only the first.
+                var players = uafixPlayers(((data && data.players) || (data && data.player ? [data.player] : [])).map(function (src) { return '<iframe src="' + src + '">'; }).join(''));
+                if (players.length) success(players); else failure('на сторінці серії немає плеєра');
             }, function (xhr) {
                 // Off Ukrainian addresses uafix shows only a trailer instead of the player, so the relay finds no player on the page.
-                if (xhr && /player_missing/.test(String(xhr.responseText || ''))) return failure('uafix показує плеєр лише на українських адресах, через проксі серія недоступна');
+                if (!boxNote && !(xhr && xhr.boxNote) && xhr && /player_missing/.test(String(xhr.responseText || ''))) return failure('uafix показує плеєр лише на українських адресах, через проксі серія недоступна.' + boxHint());
                 failure(failureText(xhr, reason(e)));
             });
         });
+    }
+    // Which of a season's episodes have the voice-over ("Плеєр 1") and which the subtitles: {episodeUrl: {voice, subs}}. Four pages at a time; an episode
+    // whose page cannot be read is left out of the answer and so stays in the list.
+    var UAFIX_PROBE_MAX = 40;
+    function uafixProbe(episodes, done) {
+        var found = {}, next = 0, active = 0, finished = false;
+        function finish() {
+            if (finished) return;
+            finished = true;
+            try { if (window.anitube_debug) console.log('AniTube uafix probe', JSON.stringify(found)); } catch (e) {}
+            done(found);
+        }
+        function pump() {
+            while (active < 4 && next < episodes.length) (function (episode) {
+                active++;
+                function over() { if (--active === 0 && next >= episodes.length) finish(); else pump(); }
+                uafixEpisodePlayer(episode.url, function (players) {
+                    if (players.length > 1) { found[episode.url] = {voice: true, subs: true}; return over(); }
+                    var one = players[0];
+                    function seen(stream, subtitles) { found[episode.url] = (subtitles && subtitles.length) ? {voice: false, subs: true} : {voice: true, subs: false}; over(); }
+                    if (zetPage(one)) zetStream(one, seen, over);
+                    else if (ashdiPage(one)) ashdiStream(one, seen, over);
+                    else over();
+                }, function (why) {
+                    // The page was read and carries no player at all (an episode listed before its release): not available in either voice.
+                    if (/немає плеєра/.test(String(why))) found[episode.url] = {voice: false, subs: false};
+                    over();
+                });
+            }(episodes[next++]));
+            if (active === 0 && next >= episodes.length) finish();
+        }
+        setTimeout(finish, 25000); // never hold the screen for long: after that every episode stays listed
+        pump();
     }
     function zetStream(url, success, failure) {
         function read(html) {
@@ -304,10 +403,19 @@
             proxyUafix('embed', url, read, function (xhr) { failure(failureText(xhr, reason(e))); });
         });
     }
-    function uafixStream(episodeUrl, success, failure) {
-        uafixEpisodePlayer(episodeUrl, function (player) {
-            if (zetPage(player)) zetStream(player, success, failure);
-            else if (ashdiPage(player)) ashdiStream(player, success, failure);
+    // kind: 'voice' (Плеєр 1, the Ukrainian voice-over) or 'subs' (Плеєр 2, the original with Ukrainian subtitles). Some episodes only have the
+    // subtitles player; it is told apart by the subtitle file its page carries.
+    function uafixStream(episodeUrl, kind, success, failure) {
+        uafixEpisodePlayer(episodeUrl, function (players) {
+            var two = players.length > 1, player = two && kind === 'subs' ? players[1] : players[0];
+            function done(stream, subtitles) {
+                var withSubs = !!(subtitles && subtitles.length);
+                if (!two && kind === 'voice' && withSubs) return failure('у цієї серії ще немає озвучення, лише субтитри: обери «Українські субтитри» у чипі «Озвучення»');
+                if (!two && kind === 'subs' && !withSubs) return failure('у цієї серії немає окремого плеєра з субтитрами');
+                success(stream, subtitles);
+            }
+            if (zetPage(player)) zetStream(player, done, failure);
+            else if (ashdiPage(player)) ashdiStream(player, done, failure);
             else failure('плеєр не підтримується');
         }, failure);
     }
@@ -316,7 +424,7 @@
     // That server lists AnimeOn's titles and voices and turns an episode into an Ashdi stream address. It answers browsers from any
     // site (CORS), so TVs call it directly. It is someone else's service: if it changes or disappears this source stops working.
     var ANIMEON_API = 'https://bbe.lme.isroot.in/api/v2';
-    var SOURCE_NAMES = {anitube: 'AniTube', makhno: 'Makhno', animeon: 'AnimeOn', uafix: 'UAflix', anilibria: 'AniLibria (рос.)'};
+    var SOURCE_NAMES = {anitube: 'AniTube', makhno: 'Makhno', animeon: 'AnimeOn', uafix: 'UAflix', dorama: 'DoramaUA', anilibria: 'AniLibria (рос.)'};
     function animeonCall(path, query, body, success, failure) {
         var url = ANIMEON_API + path;
         var settings = {url: url, dataType: 'json', timeout: 30000, cache: false, success: success, error: failure};
@@ -419,6 +527,88 @@
         Object.keys(seasons).forEach(function (number) { if (!seasons[number].length) delete seasons[number]; });
         return seasons;
     }
+    // ---- Fifth source: DoramaUA (doramaua.tv) --------------------------------------------------------------------------
+    // Its API (api.doramaua.tv) is open to any site. The player page of a show (w.davidog.top/<id>) lists every season, episode and voice
+    // as plain JSON, and states the stream address and the subtitle file in plain text, like Ashdi's pages; no script of it is run.
+    // That page is only readable from a Ukrainian address: Android Lampa asks for it itself, a Smart TV asks the home box.
+    var DORAMA_API = 'https://api.doramaua.tv/api/v2';
+    var DORAMA_PLAYER = 'https://w.davidog.top';
+    var DORAMA_REGION = /не доступно в вашем регионе|Змініть країну перегляду/i;
+    function doramaApi(path, success, failure) {
+        $.ajax({url: DORAMA_API + path, dataType: 'json', timeout: 20000, cache: false, success: success, error: failure});
+    }
+    function doramaCatalog(data) {
+        var seen = {};
+        return ((data && data.serials) || []).map(function (entry) {
+            if (!entry || !/^[a-z0-9-]{1,120}$/i.test(String(entry.slug || '')) || seen[entry.slug]) return null;
+            seen[entry.slug] = true;
+            var title = String(entry.name || '').replace(/\s+/g, ' ').trim();
+            if (!title) return null;
+            var year = String(entry.start_year || '');
+            var count = entry.last_episode && entry.episodes_all ? entry.last_episode + ' з ' + entry.episodes_all + ' сер.' : (entry.episodes_all ? entry.episodes_all + ' сер.' : '');
+            return {title: title, names: [title, entry.original_name], url: 'dorama:' + entry.slug, note: [year, entry.countries, count].filter(Boolean).join(' · '), year: year, ref: {slug: entry.slug}};
+        }).filter(Boolean);
+    }
+    // One request per player page: Android Lampa asks the site itself, otherwise the home box does.
+    function doramaPlayerPage(ref, success, failure) {
+        var url = DORAMA_PLAYER + '/' + ref.id + '?ep=' + ref.ep + (ref.track ? '&track=' + ref.track : '');
+        function done(html) {
+            html = String(html);
+            if (DORAMA_REGION.test(html) && html.indexOf('data-config') === -1) failure('сайт не пускає цю адресу (повідомлення про регіон)');
+            else success(html);
+        }
+        direct(url, {dataType: 'text', headers: {'Referer': ''}}, done, function (e) {
+            if (!boxAddress()) return failure(e === 'не Android' ? 'на цьому пристрої потрібна приставка (Налаштування → AniTube → Адреса приставки)' : reason(e));
+            boxRequest('dorama/player', {id: ref.id, ep: ref.ep, track: ref.track}, 'text', function (html) { boxNote = ''; done(html); }, function (xhr) { boxNote = boxReason(xhr); failure(boxNote); });
+        });
+    }
+    // The playlist is the text inside <div id="inputData">: {"<season>": {"<episode>": [{voice_name, voice_id, ...}]}}.
+    function doramaPlaylist(html) {
+        var start = String(html).indexOf('id="inputData"');
+        if (start < 0) return null;
+        var open = html.indexOf('>', start), close = html.indexOf('</div>', open);
+        if (open < 0 || close < 0) return null;
+        try { return JSON.parse(html.slice(open + 1, close).trim()); } catch (e) { return null; }
+    }
+    // {seasonNumber: [{label, episodes: [{title, url, ref}]}]}. Ukrainian voice-over first, then subtitles; other studios are Russian
+    // voice-overs and only appear when the Russian sources are switched on.
+    function doramaSeasons(playlist, id) {
+        var seasons = {};
+        Object.keys(playlist || {}).forEach(function (seasonKey) {
+            var byVoice = {}, order = [], episodes = playlist[seasonKey] || {};
+            Object.keys(episodes).map(Number).filter(function (n) { return n > 0; }).sort(function (a, b) { return a - b; }).forEach(function (number) {
+                (episodes[number] || []).forEach(function (entry) {
+                    var name = String((entry && entry.voice_name) || '').replace(/\s+/g, ' ').trim();
+                    if (!name || !/^\d{1,6}$/.test(String(entry.voice_id)) || /^Превью|^Автосабы/i.test(name)) return;
+                    var kind = /\(UA\)|українськ/i.test(name) && !/^Субтитр/i.test(name) ? 0 : /^Субтитр/i.test(name) ? 1 : 2;
+                    if (kind === 2 && !russianEnabled()) return;
+                    var voice = byVoice[name];
+                    if (!voice) { voice = byVoice[name] = {label: kind === 1 ? 'Субтитри (укр.)' : kind === 2 ? name + ' (рос.)' : name, kind: kind, index: order.length, episodes: []}; order.push(name); }
+                    voice.episodes.push({title: 'Серія ' + number, url: 'dorama:' + id + ':' + number + ':' + entry.voice_id, ref: {id: id, ep: number, track: entry.voice_id}});
+                });
+            });
+            var voices = order.map(function (name) { return byVoice[name]; }).sort(function (a, b) { return (a.kind - b.kind) || (a.index - b.index); });
+            if (voices.length) seasons[parseInt(seasonKey, 10) || 1] = voices;
+        });
+        return seasons;
+    }
+    // The stream address sits in data-config='{"hls":"https://s1.davidog.top/..."}'; the Ukrainian subtitle file in data-ua_subtitle.
+    function doramaStream(ref, success, failure) {
+        doramaPlayerPage(ref, function (html) {
+            var config = String(html).match(/data-config='(\{[^']*\})'/), stream = '';
+            try { stream = absolute(JSON.parse(config[1]).hls, DORAMA_PLAYER + '/'); } catch (e) {}
+            var host = stream && new URL(stream).hostname;
+            if (!(stream && /(^|\.)davidog\.top$/i.test(host) && media(stream))) return failure('на сторінці плеєра немає посилання на відео');
+            var subtitles = [];
+            [['ua', 'Українські'], ['ru', 'Російські']].forEach(function (pair) {
+                var match = String(html).match(new RegExp('data-' + pair[0] + '_subtitle="([^"]*)"'));
+                var url = match && absolute(match[1], DORAMA_PLAYER + '/');
+                if (url && new URL(url).hostname === 'w.davidog.top' && /\.(vtt|srt)$/i.test(new URL(url).pathname) && (pair[0] === 'ua' || russianEnabled())) subtitles.push({label: pair[1], url: url});
+            });
+            success(stream, subtitles);
+        }, failure);
+    }
+
     // Other names of the card from TMDB (Ukrainian, English): a card shown with its Japanese name can still be found.
     function tmdbTitles(movie, done) {
         var finished = false;
@@ -540,7 +730,10 @@
             return value === true || value === 'true';
         } catch (e) { return false; }
     }
-    function sourceAllowed(name) { return !RUSSIAN_SOURCES[name] || russianEnabled(); }
+    function sourceAllowed(name) {
+        if (name === 'dorama' && !doramaAvailable()) return false; // its player page is readable only from the box or Android Lampa
+        return !RUSSIAN_SOURCES[name] || russianEnabled();
+    }
 
     // A card that only has a Japanese name: AniList (public, free, open to any origin) turns it into the romaji and English titles, which
     // is how AniLibria and most Latin-script catalogues name anime. The hit must have the same native title, or the same year.
@@ -578,7 +771,8 @@
         var hint = '';
         if (!home && !(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'))) hint = ' На цьому пристрої потрібен домашній проксі: Налаштування → AniTube.';
         else if (home && /^http:/i.test(home) && window.location && window.location.protocol === 'https:') hint = ' Lampa відкрита через https, тож браузер блокує http-проксі.';
-        return '(напряму: ' + directReason + '; ' + status + ')' + hint;
+        var note = (xhr && xhr.boxNote) || boxNote;
+        return '(' + (note ? note + '; ' : '') + 'напряму: ' + directReason + '; ' + status + ')' + hint;
     }
 
     // ---- Names ---------------------------------------------------------------------------------------------------
@@ -625,7 +819,31 @@
         });
         return tiers;
     }
+    // Every name of the card in full (no five-word cut), without repeats; what a candidate's names are compared with.
+    function fullNames(movie, extra) {
+        var seen = {}, out = [];
+        [movie.title, movie.name, movie.original_title, movie.original_name].concat(extra || [], alternativeNames(movie)).forEach(function (raw) {
+            var name = String(raw || '').replace(/\s+/g, ' ').trim(), low = name.toLowerCase();
+            if (name && !seen[low]) { seen[low] = true; out.push(name); }
+        });
+        return out;
+    }
     function normalize(value) { return String(value || '').toLowerCase().replace(/[^a-zа-яіїєґ0-9]+/g, ' ').trim(); }
+    // Of the names a site strings together ("A / B / C"), the one to show: the card's own title if it is there, otherwise the Ukrainian name
+    // that shares the most words with it, otherwise the first.
+    function pickName(parts, shown) {
+        var target = normalize(shown);
+        var same = parts.filter(function (part) { return normalize(part) === target; })[0];
+        if (same) return same;
+        var wanted = nameWords(shown), best = parts[0], bestScore = -1;
+        parts.forEach(function (part) {
+            var own = nameWords(part);
+            var shared = wanted.filter(function (w) { return own.some(function (o) { return sameWord(o, w); }); }).length;
+            var score = shared * 10 + (/[а-яіїєґё]/i.test(part) ? 5 : 0) - (/\//.test(part) ? 1 : 0);
+            if (score > bestScore) { best = part; bestScore = score; }
+        });
+        return best;
+    }
     function sentence(value) {
         var low = String(value || '').toLowerCase();
         return low.charAt(0).toUpperCase() + low.slice(1);
@@ -664,7 +882,7 @@
         var key = String(movie.id || movie.original_title || movie.title || '');
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
-        var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
         var seasons = {}, season = 0;
         function active() { return Lampa.Activity.active() && Lampa.Activity.active().activity === self.activity; }
 
@@ -718,7 +936,7 @@
         // AniTube keeps every season on its own page, so TMDB's season is only matched by the number in the title (or "1" for the first one).
         function tmdbSeason() {
             if (!isTv || !movie.id || !item) return 0;
-            if (source === 'uafix' || source === 'makhno') return season;
+            if (source === 'uafix' || source === 'makhno' || source === 'dorama') return season;
             if (source === 'animeon') return seasonOf(item) || (item.ref && item.ref.season) || 0;
             return seasonOf(item) || (results.length <= 1 || results.indexOf(item) === 0 ? 1 : 0);
         }
@@ -816,12 +1034,13 @@
                 Lampa.Select.show({
                     title: 'Джерело серій',
                     items: ([
-                        {title: 'AniTube', subtitle: 'озвучення й субтитри, Ashdi', selected: source === 'anitube', value: 'anitube'},
-                        {title: 'Makhno', subtitle: 'усі озвучення Ashdi, пошук за номером картки', selected: source === 'makhno', value: 'makhno'},
-                        {title: 'AnimeOn', subtitle: 'багато озвучок, є новинки аніме', selected: source === 'animeon', value: 'animeon'},
-                        {title: 'UAflix', subtitle: 'серіали й фільми, лише з України', selected: source === 'uafix', value: 'uafix'},
-                        {title: 'AniLibria', subtitle: 'аніме, російська озвучка, вищий бітрейт', selected: source === 'anilibria', value: 'anilibria', ru: true}
-                    ]).filter(function (entry) { return !entry.ru || russianEnabled(); }),
+                        {title: 'AniTube', subtitle: 'Аніме (укр)', selected: source === 'anitube', value: 'anitube'},
+                        {title: 'Makhno', subtitle: 'Аніме, Фільми, Серіали (укр)', selected: source === 'makhno', value: 'makhno'},
+                        {title: 'AnimeOn', subtitle: 'Аніме (укр)', selected: source === 'animeon', value: 'animeon'},
+                        {title: 'UAflix', subtitle: 'Аніме, Фільми, Серіали, Дорами (укр)', selected: source === 'uafix', value: 'uafix'},
+                        {title: 'DoramaUA', subtitle: 'Дорами (укр)', selected: source === 'dorama', value: 'dorama', box: true},
+                        {title: 'AniLibria', subtitle: 'Аніме (рос)', selected: source === 'anilibria', value: 'anilibria', ru: true}
+                    ]).filter(function (entry) { return (!entry.ru || russianEnabled()) && (!entry.box || sourceAllowed('dorama')); }),
                     onBack: function () { Lampa.Controller.toggle('content'); },
                     onSelect: function (picked) {
                         Lampa.Controller.toggle('content');
@@ -845,14 +1064,14 @@
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
-            if (source === 'uafix' || source === 'makhno') {
+            if (source === 'uafix' || source === 'makhno' || source === 'dorama') {
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (numbers.length > 1) {
                     addRow(numbers.map(function (number) {
                         return chip('Сезон ' + number, '', number === season, function () {
                             if (number === season) return;
                             remember(key, {season: number});
-                            if (source === 'makhno') self.useMakhnoSeason(number); else self.useSeason(number);
+                            if (source === 'makhno' || source === 'dorama') self.useMakhnoSeason(number); else self.useSeason(number);
                         });
                     }));
                 }
@@ -889,8 +1108,8 @@
         this.episodes = function (current, voice) {
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title);
-                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'makhno' ? '#s' + season : '') + ':' + (info.number || info.original));
-                return {url: episode.url, ref: episode.ref, wantSubtitles: episode.subtitles, subtitles: episode.subs, info: info, title: info.label + ' · ' + item.title, timeline: Lampa.Timeline.view(hash)};
+                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'makhno' || source === 'dorama' ? '#s' + season : '') + ':' + (info.number || info.original));
+                return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, info: info, title: info.label + ' · ' + item.title, timeline: Lampa.Timeline.view(hash)};
             });
             var lastWatched = -1;
             entries.forEach(function (entry, index) { if (entry.timeline.percent > 0) lastWatched = index; });
@@ -902,7 +1121,8 @@
             loadSeason(tmdbSeason()).then(function (tm) {
                 if (closed || current !== token) return;
                 // The stills and descriptions are only used when TMDB's season is about as long as AniTube's list, so they cannot belong to another season.
-                var count = tm.__count || 0, fits = count && Math.abs(count - entries.length) <= Math.max(2, Math.round(count * 0.2));
+                // A show picked from the list that does not share a name with the card (another drama on an anime's card) gets no stills.
+                var count = tm.__count || 0, fits = count && item.matched !== false && Math.abs(count - entries.length) <= Math.max(2, Math.round(count * 0.2));
                 list.empty();
                 entries.forEach(function (entry, index) {
                     var t = (fits && entry.info.number && tm[entry.info.number]) || {};
@@ -959,11 +1179,25 @@
             for (var i = 0; i < 4; i++) [tiers[0], tiers[1]].forEach(function (tier) { if (tier && tier[i] && names.length < 5) names.push(tier[i]); });
             if (!manual && names.length < 2 && tiers[2] && tiers[2][0]) names.push(tiers[2][0]);
             if (!manual && spec.words) names = unique(names.concat(names.reduce(function (all, q) { return all.concat(nameWords(q).filter(function (w) { return w.length >= 5; })); }, []))).slice(0, 8);
-            var cards = manual ? [] : flat.map(nameWords).filter(function (c) { return c.length; });
+            // Scored against the card's whole names, not the shortened search queries: a long title cut to five words would match any show that shares
+            // two of them ("Самый сильный в мире заступник: Страна лабиринта…" matched "На самом деле я самый сильный?").
+            var cards = manual ? [] : fullNames(movie, extraTerms).map(nameWords).filter(function (c) { return c.length; });
             var year = parseInt(String(movie.release_date || movie.first_air_date || '').slice(0, 4), 10) || 0;
             var pending = names.length, seen = {}, list = [], failures = 0, lastFailure = [];
             function finish() {
                 if (closed) return;
+                // Some sites list every name of a show in one title ("Доктор X / Доктор Ікс / ... / Doctor X: ..."). Each name is scored on its own, and the
+                // screen shows only the one that looks most like the card's title, so the heading stays readable.
+                var shown = displayName();
+                list.forEach(function (r) {
+                    var parts = String(r.title || '').split(/\s+\/\s+/).map(function (part) { return part.trim(); }).filter(Boolean);
+                    if (parts.length < 2) return;
+                    r.names = unique((r.names || []).concat(parts));
+                    r.title = shortName(pickName(parts, shown));
+                });
+                // Whether a result is really the card's show decides if the card's TMDB stills may be used for its episodes.
+                var matchCards = fullNames(movie, extraTerms).map(nameWords).filter(function (c) { return c.length; });
+                list.forEach(function (r) { r.matched = titleScore(r.names || [r.title], matchCards) > 0; });
                 var scored = list.map(function (r) { return {r: r, score: manual ? 1 : titleScore(r.names || [r.title], cards)}; });
                 // Developer aid: window.anitube_debug = true in the console prints every candidate with its score.
                 try { if (window.anitube_debug) console.log('AniTube search', source, names, scored.map(function (e) { return e.score.toFixed(1) + ' ' + e.r.title + ' [' + (e.r.names || []).join(' | ') + ']'; })); } catch (e) {}
@@ -976,7 +1210,10 @@
                     var clear = manual || (top >= 11 && next < top * 0.7);
                     // A fuzzy source (AniLibria) never opens one of several results by itself: the right one is picked from the list.
                     var auto = clear && (!spec.strict || scored.length === 1);
-                    return self.found(scored.map(function (e) { return e.r; }), flat, spec.strict && !auto, auto && scored.length > 1 ? scored[0].r : null);
+                    // The text search of uafix and DoramaUA also returns unrelated shows; a lone result that shares no name with the card is shown
+                    // for confirmation instead of being opened (it used to open another drama's episodes on an anime's card).
+                    var unsure = !!spec.verify && !manual && top <= 0;
+                    return self.found(scored.map(function (e) { return e.r; }), flat, (spec.strict && !auto) || unsure, auto && scored.length > 1 ? scored[0].r : null);
                 }
                 if (self.nextSource()) return self.search(0);
                 if (failures === names.length) return self.empty(spec.failed(lastFailure[0], lastFailure[1]));
@@ -1016,18 +1253,24 @@
                     nothing: function (m) { return 'AnimeOn: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
                 uafix: {
-                    label: 'UAflix',
+                    label: 'UAflix', verify: true,
                     fetch: function (q, ok, fail) { uafixGet('search', q, function (html) { ok(uafixCatalog(html)); }, fail); },
-                    failed: function (xhr, why) { return 'UAflix: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.'; },
+                    failed: function (xhr, why) { return 'UAflix: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.' + boxHint(); },
                     nothing: function (m) { return 'UAflix: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
+                },
+                dorama: {
+                    label: 'DoramaUA', verify: true,
+                    fetch: function (q, ok, fail) { doramaApi('/search?text=' + encodeURIComponent(q), function (data) { ok(doramaCatalog(data)); }, fail); },
+                    failed: function (xhr) { return 'DoramaUA: сервер каталогу не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    nothing: function (m) { return 'DoramaUA: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
                 anilibria: {
                     label: 'AniLibria', strict: true, words: true,
                     fetch: function (q, ok, fail) { anilibriaCall('/app/search/releases?query=' + encodeURIComponent(q), function (data) { ok(anilibriaCatalog(data)); }, fail); },
                     failed: function () { return 'AniLibria: сервер не відповів.'; },
                     nothing: function (m, raw) {
-                        return 'AniLibria: ' + (m ? 'за запитом «' + m + '»' : 'у цього тайтлу') + (raw ? ' сервер повернув ' + raw + ', але нічого схожого' : ' сервер нічого не повернув, нічого не знайдено') +
-                            '. AniLibria називає аніме за ромадзі чи російською; спробуй таку назву через «Пошук».';
+                        return 'AniLibria: ' + (m ? 'за запитом «' + m + '»' : 'цього аніме') + (raw ? ' сервер повернув ' + raw + ' результатів, жоден не схожий на цей тайтл' : ' сервер нічого не знайшов') +
+                            ', схоже, його немає в каталозі AniLibria. Якщо знаєш його назву там (ромадзі чи російською), введи її через «Пошук».';
                     }
                 }
             };
@@ -1079,8 +1322,7 @@
 
         this.empty = function (message) {
             if (/нічого/.test(message) && !manual && lastQueries.length) {
-                message += ' Шукали: ' + lastQueries.slice(0, 6).map(function (q) { return '«' + q + '»'; }).join(', ') + '.';
-                message += ' Назв із TMDB/AniList: ' + extraTerms.length + ', альтернативних у картці: ' + alternativeNames(movie).length + '.';
+                message += ' Шукали: ' + lastQueries.slice(0, 3).map(function (q) { return '«' + q + '»'; }).join(', ') + ' та ще ' + Math.max(0, lastQueries.length - 3) + ' назв.';
             }
             if (source === 'anitube') {
                 var others = ORDER.filter(function (name) { return name !== 'anitube' && sourceAllowed(name); }).map(function (name) { return SOURCE_NAMES[name]; });
@@ -1122,6 +1364,7 @@
             if (source === 'uafix') return this.openUafix();
             if (source === 'animeon') return this.openAnimeon();
             if (source === 'makhno') return this.openMakhno();
+            if (source === 'dorama') return this.openDorama();
             if (source === 'anilibria') return this.openAnilibria();
             fetchPlaylist(item.url, function (data) {
                 if (closed || mine !== openSeq) return;
@@ -1196,6 +1439,30 @@
             if (!fresh) focusAt(1, Math.max(0, Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }).indexOf(number)));
         };
 
+        // DoramaUA: the show's API record names its player; the player page lists every season, episode and voice.
+        this.openDorama = function () {
+            var mine = openSeq;
+            doramaApi('/serials/' + encodeURIComponent(item.ref.slug), function (data) {
+                if (closed || mine !== openSeq) return;
+                var id = data && data.serial && data.serial.page_player;
+                if (!/^\d{1,8}$/.test(String(id))) return self.empty('DoramaUA: у цього тайтлу немає плеєра.');
+                doramaPlayerPage({id: id, ep: 1}, function (html) {
+                    if (closed || mine !== openSeq) return;
+                    var playlist = doramaPlaylist(html);
+                    if (!playlist) return self.empty('DoramaUA: не вдалося розібрати список серій на сторінці плеєра.');
+                    seasons = doramaSeasons(playlist, id);
+                    var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
+                    if (!numbers.length) return self.empty('DoramaUA: для цього тайтлу немає українських озвучок чи субтитрів' + (russianEnabled() ? '.' : ' (російські озвучки приховано: Налаштування → AniTube → Показувати російські джерела).'));
+                    var wanted = saved(key).season;
+                    self.useMakhnoSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                }, function (why) {
+                    if (!closed && mine === openSeq) self.empty('DoramaUA: не вдалося отримати список серій (' + why + ').');
+                });
+            }, function (xhr) {
+                if (!closed && mine === openSeq) self.empty('DoramaUA: не вдалося отримати дані тайтлу' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+            });
+        };
+
         // One AnimeOn season: its Ashdi voices become the voices of the screen, in the order the server lists them.
         this.openAnimeon = function () {
             var mine = openSeq;
@@ -1231,27 +1498,44 @@
                 var wanted = saved(key).season;
                 self.useSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
             }, function (xhr, why) {
-                if (!closed && mine === openSeq) self.empty('UAflix: не вдалося отримати список серій ' + failureText(xhr, why) + '.');
+                if (!closed && mine === openSeq) self.empty('UAflix: не вдалося отримати список серій ' + failureText(xhr, why) + '.' + boxHint());
             });
         };
         this.useSeason = function (number, fresh) {
             season = number;
-            voices = [{
-                label: 'Українська',
-                episodes: seasons[number].map(function (episode) { return {title: episode.number ? 'Серія ' + episode.number : 'Фільм', url: episode.url}; })
-            }];
-            voiceIndex = 0;
-            this.focusEpisode = !!fresh;
-            this.draw();
-            this.loading(false);
-            this.start(true);
-            if (!fresh) focusAt(1, Math.max(0, Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }).indexOf(number)));
+            var plain = seasons[number], mine = openSeq;
+            function build(found) {
+                if (closed || mine !== openSeq || season !== number) return;
+                // Only episodes that really have the voice-over / the subtitles are listed; a failed check keeps the episode.
+                var made = ['voice', 'subs'].map(function (kind) {
+                    return {
+                        label: kind === 'voice' ? 'Українська озвучка' : 'Українські субтитри',
+                        episodes: plain.filter(function (episode) { var f = found && found[episode.url]; return !f || f[kind]; })
+                            .map(function (episode) { return {title: episode.number ? 'Серія ' + episode.number : 'Фільм', url: episode.url, kind: kind}; })
+                    };
+                });
+                voices = made.filter(function (voice) { return voice.episodes.length; });
+                if (!voices.length) voices = made;
+                var wantedVoice = saved(key).voice;
+                voiceIndex = 0;
+                voices.forEach(function (voice, index) { if (voice.label === wantedVoice) voiceIndex = index; });
+                self.focusEpisode = !!fresh;
+                self.draw();
+                self.loading(false);
+                self.start(true);
+                if (!fresh) focusAt(1, Math.max(0, Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }).indexOf(number)));
+            }
+            // The show page lists every episode the site has a page for, but a voice-over often exists for fewer of them than the subtitles.
+            if (plain.length < 2 || plain.length > UAFIX_PROBE_MAX) return build(null);
+            this.loading(true);
+            uafixProbe(plain, build);
         };
 
         // 3. episode list with watch progress; the whole list becomes the player's playlist
         this.resolve = function (entry, success, failure) {
             if (entry.stream) return success(entry.stream);
-            if (source === 'uafix') return uafixStream(entry.url, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
+            if (source === 'uafix') return uafixStream(entry.url, entry.kind, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
+            if (source === 'dorama') return doramaStream(entry.ref, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (source === 'animeon') return animeonStream(entry.ref, entry.wantSubtitles, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (media(entry.url)) return success(entry.stream = entry.url);
             if (!ashdiPage(entry.url)) return failure('плеєр не підтримується');
@@ -1269,6 +1553,7 @@
             var behind = PLAYLIST_BEHIND, ahead = PLAYLIST_AHEAD;
             if (source === 'uafix') { behind = UAFIX_BEHIND; ahead = UAFIX_AHEAD; }
             if (source === 'animeon') { behind = ANIMEON_BEHIND; ahead = ANIMEON_AHEAD; }
+            if (source === 'dorama') { behind = DORAMA_BEHIND; ahead = DORAMA_AHEAD; }
             var from = Math.max(0, index - behind), to = Math.min(entries.length - 1, index + ahead);
             var pending = to - from + 1, failure = '';
             function settled() {
@@ -1390,6 +1675,17 @@
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
+                param: {name: 'anitube_box', type: 'input', values: '', 'default': '', placeholder: '192.168.0.15:8787'},
+                field: {name: 'Адреса приставки', description: 'Android-приставка вдома з ретранслятором (home-proxy/box-relay.mjs). Потрібна на Smart TV для UAflix і DoramaUA. Адреса змінюється, коли приставку переносять в іншу мережу.'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_box_check', type: 'button'},
+                field: {name: 'Перевірити приставку', description: 'Показує, чи приставка відповідає і до яких сайтів вона дістається.'},
+                onChange: function () { boxCheck(); }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
                 param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
                 field: {name: 'Адреса проксі', description: 'Не потрібна: у плагін уже вшито робочу адресу. Заповнюй лише щоб підставити власний проксі.'}
             });
@@ -1431,7 +1727,7 @@
             type: 'video',
             version: VERSION,
             name: 'AniTube',
-            description: 'Озвучення, субтитри та серії з AniTube, AnimeOn і uafix',
+            description: 'Озвучення, субтитри та серії з AniTube, Makhno, AnimeOn, UAflix і DoramaUA',
             onContextMenu: function () {
                 return {name: 'AniTube', description: 'Актуальний пошук на anitube.in.ua'};
             },
