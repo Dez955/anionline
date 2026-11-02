@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.11';
+    var VERSION = '1.8.12';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -732,6 +732,10 @@
                 (player ? /^\/embed\/\d{1,10}\/[a-f\d]{6,64}$/i.test(url.pathname) : /^\/\d{1,8}-[a-z0-9-]+\.html$/i.test(url.pathname));
         } catch (e) { return false; }
     }
+    // Keep a standalone X/Х/Ікс meaningful: the common scorer drops one-letter words.
+    function uaserialHasX(value) {
+        return /(?:^|[^a-zа-яіїєґ0-9])(?:x|х|ікс|икс)(?=$|[^a-zа-яіїєґ0-9])/i.test(String(value || ''));
+    }
     function uaserialGet(action, value, success, failure) {
         if (action === 'search' && (!value || value.length > 200)) return failure(null, 'invalid_query');
         if (action !== 'search' && !uaserialPage(value, action === 'player')) return failure(null, 'invalid_page');
@@ -746,16 +750,28 @@
     }
     function uaserialCatalog(html) {
         var doc = page(html), seen = {};
-        return list(doc, 'a[href]').map(function (link) {
+        return list(doc, '.short-item').map(function (card) {
+            var link = card.querySelector('a[href]');
+            if (!link) return null;
             var url = absolute(link.getAttribute('href'), UASERIALS);
-            var title = (link.getAttribute('title') || text(link)).replace(/\s+/g, ' ').trim();
-            if (!uaserialPage(url, false) || !title || seen[url] || /^(дивитися|переглянути|читати)$/i.test(title)) return null;
+            var poster = link.querySelector('img[alt]');
+            var title = (text(card.querySelector('.th-title')) || (poster && poster.getAttribute('alt')) || '').replace(/\s+/g, ' ').trim();
+            var original = text(card.querySelector('.th-title-oname'));
+            if (!uaserialPage(url, false) || !title || seen[url]) return null;
             seen[url] = true;
-            return {title: title, names: [title], url: url, note: '', ref: {url: url}};
+            return {title: title, names: [title, original].filter(Boolean), url: url, note: text(card.querySelector('.short-label')), ref: {url: url}};
         }).filter(Boolean);
     }
+    function uaserialMedia(url) {
+        return /^https:\/\/(?:s\d+\.)?hdvbua\.pro\/[^\s]*\.m3u8(?:[?#]|$)/i.test(url || '');
+    }
     function uaserialPlaylist(html) {
-        var match = String(html || '').match(/\bfile\s*:\s*'((?:\\.|[^'])+)'/i), data;
+        var raw = String(html || ''), match = raw.match(/\bfile\s*:\s*'((?:\\.|[^'])+)'/i), data;
+        var direct = raw.match(/\bfile\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/i);
+        if (direct) {
+            var movie = jsString(direct[1]);
+            if (uaserialMedia(movie)) return {1: [{label: 'Фільм', episodes: [{title: 'Фільм', url: movie}]}]};
+        }
         if (!match) return null;
         try { data = JSON.parse(match[1].replace(/\\'/g, "'")); } catch (e) { return null; }
         if (!Array.isArray(data)) return null;
@@ -766,7 +782,7 @@
             (seasonData.folder || []).forEach(function (voiceData) {
                 var episodes = (voiceData.folder || []).map(function (episode, ei) {
                     var url = absolute(episode.file, UASERIALS);
-                    if (!url || !/^https:\/\/(?:s\d+\.)?hdvbua\.pro\/media\/content\/.+\.m3u8(?:[?#]|$)/i.test(url)) return null;
+                    if (!uaserialMedia(url)) return null;
                     return {title: episode.title || 'Серія ' + (ei + 1), url: url};
                 }).filter(Boolean);
                 if (episodes.length) voices.push({label: voiceData.title || 'Відео', episodes: episodes});
@@ -1708,6 +1724,9 @@
                 var matchCards = fullNames(movie, extraTerms).map(nameWords).filter(function (c) { return c.length; });
                 list.forEach(function (r) { r.matched = titleScore(r.names || [r.title], matchCards) > 0; });
                 var scored = list.map(function (r) { return {r: r, score: manual ? 1 : titleScore(r.names || [r.title], cards)}; });
+                if (source === 'uaserials' && !manual && fullNames(movie, extraTerms).some(uaserialHasX)) {
+                    scored = scored.filter(function (entry) { return (entry.r.names || [entry.r.title]).some(uaserialHasX); });
+                }
                 // Developer aid: window.anitube_debug = true in the console prints every candidate with its score.
                 try { if (window.anitube_debug) console.log('AniTube search', source, names, scored.map(function (e) { return e.score.toFixed(1) + ' ' + e.r.title + ' [' + (e.r.names || []).join(' | ') + ']'; })); } catch (e) {}
                 if (spec.strict) scored = scored.filter(function (e) { return e.score > 0; });
@@ -1718,7 +1737,7 @@
                     var top = scored[0].score, next = scored[1] ? scored[1].score : 0;
                     var clear = manual || (top >= 11 && next < top * 0.7);
                     // A fuzzy source (AniLibria) never opens one of several results by itself: the right one is picked from the list.
-                    var auto = clear && (!spec.strict || scored.length === 1);
+                    var auto = clear && (!spec.strict || scored.length === 1) && (!spec.confirm || manual);
                     // The text search of uafix and DoramaUA also returns unrelated shows; a lone result that shares no name with the card is shown
                     // for confirmation instead of being opened (it used to open another drama's episodes on an anime's card).
                     var unsure = !!spec.verify && !manual && top <= 0;
@@ -1774,7 +1793,7 @@
                     nothing: function (m) { return 'DoramaUA: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
                 uaserials: {
-                    label: 'UA Serials', verify: true,
+                    label: 'UA Serials', verify: true, strict: true, confirm: true,
                     fetch: function (q, ok, fail) { uaserialGet('search', q, function (html) { ok(uaserialCatalog(html)); }, fail); },
                     failed: function (xhr) { return 'UA Serials: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'UA Serials: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
