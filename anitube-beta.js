@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.8';
+    var VERSION = '1.8.9';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -270,16 +270,18 @@
     var MOON_PLAYER_SAVED = 'anitube_moon_player_saved';
     function restoreMoonPlayer() {
         var saved = String(Lampa.Storage.get(MOON_PLAYER_SAVED, '') || '').split('|');
-        if (saved.length !== 2) return;
+        if (saved.length < 2) return;
         Lampa.Storage.set('player', saved[0], true);
         Lampa.Storage.set('player_hls_method', saved[1], true);
+        if (saved[2]) Lampa.Storage.set('video_quality_default', saved[2], true);
         Lampa.Storage.set(MOON_PLAYER_SAVED, '', true);
     }
+    function tvPlatform() { return !!(Lampa.Platform && (Lampa.Platform.is('tizen') || Lampa.Platform.is('webos'))); }
     function useMoonPlayer() {
         var listener = Lampa.Player.listener;
-        if (!(Lampa.Platform && (Lampa.Platform.is('tizen') || Lampa.Platform.is('webos'))) || !listener || !listener.follow || !listener.remove) return;
+        if (!tvPlatform() || !listener || !listener.follow || !listener.remove) return;
         if (!Lampa.Storage.get(MOON_PLAYER_SAVED, '')) {
-            Lampa.Storage.set(MOON_PLAYER_SAVED, Lampa.Storage.field('player') + '|' + Lampa.Storage.field('player_hls_method'), true);
+            Lampa.Storage.set(MOON_PLAYER_SAVED, [Lampa.Storage.field('player'), Lampa.Storage.field('player_hls_method'), Lampa.Storage.field('video_quality_default')].join('|'), true);
             listener.follow('destroy', function restore() {
                 listener.remove('destroy', restore);
                 restoreMoonPlayer();
@@ -287,6 +289,68 @@
         }
         Lampa.Storage.set('player', 'inner', true);
         Lampa.Storage.set('player_hls_method', 'hlsjs', true);
+        Lampa.Storage.set('video_quality_default', '1080', true);
+    }
+    function autoQualityEnabled() {
+        var value = Lampa.Storage.field('anitube_auto_quality');
+        return value !== false && value !== 'false';
+    }
+    // Moon starts at its highest quality. With the setting on, repeated or long stalls lower it one step.
+    function watchMoonQuality() {
+        var player = Lampa.PlayerVideo, listener = player && player.listener;
+        if (!listener || !listener.follow || !listener.remove || !player.video) return function () {};
+        var levels = [], video = null, timer = null, stalls = [], calm = 0, lowered = false, stopped = false;
+        function ordered() {
+            return levels.slice().sort(function (a, b) { return (Number(b.height) || 0) - (Number(a.height) || 0); });
+        }
+        function clearStall() { clearTimeout(timer); timer = null; }
+        function lower() {
+            clearStall();
+            stalls = [];
+            calm = Date.now() + 30000;
+            var list = ordered(), next = list[Math.max(0, list.findIndex(function (level) { return level.selected; })) + 1];
+            if (!next) return;
+            lowered = true;
+            next.enabled = true;
+            Lampa.Noty.show('Погане з\'єднання, знижую якість' + (next.title ? ' до ' + next.title : ''), {time: 6000});
+        }
+        function waiting() {
+            var now = Date.now();
+            if (timer || now < calm || !video || video.seeking || !(video.currentTime > 3) || !autoQualityEnabled()) return;
+            stalls = stalls.filter(function (time) { return now - time < 60000; });
+            stalls.push(now);
+            if (stalls.length >= 3) lower();
+            else timer = setTimeout(lower, 6000);
+        }
+        function release() {
+            if (!video) return;
+            video.removeEventListener('waiting', waiting);
+            video.removeEventListener('playing', clearStall);
+            video = null;
+        }
+        function onLevels(event) {
+            levels = (event && event.levels) || [];
+            var next = player.video();
+            if (next !== video && next && next.addEventListener) {
+                release();
+                video = next;
+                video.addEventListener('waiting', waiting);
+                video.addEventListener('playing', clearStall);
+            }
+            var top = ordered()[0];
+            if (top && !top.selected && !lowered) top.enabled = true;
+        }
+        function stop() {
+            if (stopped) return;
+            stopped = true;
+            clearStall();
+            release();
+            listener.remove('levels', onLevels);
+            if (Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('destroy', stop);
+        }
+        listener.follow('levels', onLevels);
+        if (Lampa.Player.listener && Lampa.Player.listener.follow) Lampa.Player.listener.follow('destroy', stop);
+        return stop;
     }
 
     function moonFailure(xhr, viaProxy) {
@@ -1085,6 +1149,14 @@
         var low = String(value || '').toLowerCase();
         return low.charAt(0).toUpperCase() + low.slice(1);
     }
+    // A team's default player: Moon when it has at least Ashdi's episodes, then Ashdi, then the first that works.
+    function preferredVoice(voices, label) {
+        var team = voices.filter(function (v) { return v.label === label && v.supported !== false; });
+        var ashdi = team.filter(function (v) { return v.player === 'Ashdi'; })[0];
+        var moon = team.filter(function (v) { return v.player === 'Moon'; })[0];
+        var best = moon && (!ashdi || moon.episodes.length >= ashdi.episodes.length) ? moon : ashdi || team[0];
+        return voices.indexOf(best);
+    }
     // "ОЗВУЧЕННЯ" + "QTV" -> "Озвучення · QTV"
     function voiceLabel(source) { return sentence(source.mode) + (source.variant ? ' · ' + source.variant : ''); }
     // Episode title as AniTube lists it: "12 серія" becomes "Серія 12"; "OVA 1", "Фільм" and the like stay as they are.
@@ -1122,6 +1194,13 @@
         var descending = Lampa.Storage.get('anitube_episode_order', 'asc') === 'desc';
 
         function saved(key) { var all = Lampa.Storage.get('anitube_choice', '{}'); return (all && all[key]) || {}; }
+        // The player the owner picked by hand wins; otherwise the team's default. This is the variant a voice opens.
+        function voiceFor(label) {
+            var player = saved(key).player;
+            var picked = !player ? -1 : voices.findIndex(function (v) { return v.label === label && v.player === player && v.supported !== false; });
+            if (picked < 0) picked = preferredVoice(voices, label);
+            return picked < 0 ? voices.findIndex(function (v) { return v.label === label; }) : picked;
+        }
         function remember(key, value) {
             var all = Lampa.Storage.get('anitube_choice', '{}');
             if (!all || typeof all !== 'object') all = {};
@@ -1133,7 +1212,7 @@
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [];
         var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
-        var playbackMessage = '', moonWatchStop = null, playbackListener = null;
+        var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null;
         var playbackOwner = 'anitube-' + Date.now() + '-' + Math.random();
         var seasons = {}, season = 0;
         function playbackStatus(code, message) {
@@ -1233,7 +1312,11 @@
             if (Lampa.Player.listener && Lampa.Player.listener.follow) {
                 playbackListener = function (work) {
                     if (moonWatchStop) { moonWatchStop(); moonWatchStop = null; }
-                    if (work && work.anitube_owner === playbackOwner && work.anitube_moon) moonWatchStop = watchMoonPlayback(work, playbackStatus);
+                    if (moonQualityStop) { moonQualityStop(); moonQualityStop = null; }
+                    if (work && work.anitube_owner === playbackOwner && work.anitube_moon) {
+                        moonWatchStop = watchMoonPlayback(work, playbackStatus);
+                        if (tvPlatform()) moonQualityStop = watchMoonQuality();
+                    }
                 };
                 Lampa.Player.listener.follow('start', playbackListener);
             }
@@ -1285,15 +1368,15 @@
                     if (voices.length < 2) return Lampa.Noty.show('Для цього тайтлу лише один варіант озвучення');
                     Lampa.Select.show({
                         title: 'Озвучення / субтитри',
-                        items: voices.map(function (v, index) { return {title: v.label, subtitle: 'Серій: ' + v.episodes.length, selected: v.label === voice.label, index: index}; }).filter(function (v, index, list) { return list.findIndex(function (x) { return x.title === v.title; }) === index; }),
+                        items: voices.filter(function (v, index) { return voices.findIndex(function (x) { return x.label === v.label; }) === index; }).map(function (v) {
+                            var opens = voiceFor(v.label);
+                            return {title: v.label, subtitle: 'Серій: ' + voices[opens].episodes.length, selected: v.label === voice.label, index: opens};
+                        }),
                         onBack: function () { Lampa.Controller.toggle('content'); },
                         onSelect: function (picked) {
                             playbackMessage = '';
-                            var label = voices[picked.index].label;
-                            var preferred = voices.findIndex(function (v) { return v.label === label && v.player === saved(key).player && v.supported !== false; });
-                            if (preferred < 0) preferred = voices.findIndex(function (v) { return v.label === label && v.supported !== false; });
-                            voiceIndex = preferred < 0 ? picked.index : preferred;
-                            remember(key, {voice: voices[voiceIndex].label, player: voices[voiceIndex].player || ''});
+                            voiceIndex = picked.index;
+                            remember(key, {voice: voices[voiceIndex].label, player: saved(key).player || ''});
                             Lampa.Controller.toggle('content');
                             self.draw();
                             focusAt(0, 0);
@@ -1715,15 +1798,18 @@
                 if (!data || !data.success || !data.response) return self.empty('AniTube: сайт не повернув список серій.');
                 var all = sources(data.response, item.url);
                 if (!all.length) return self.empty('AniTube: не вдалося розібрати список серій.');
+                all = all.filter(function (variant) { return !/fenix|фенікс|феникс/i.test(variant.player); });
+                if (!all.length) return self.empty('AniTube: для цього тайтлу є лише плеєр Fenix, а він не працює.');
                 voices = all.map(function (variant) {
                     var player = /ashdi/i.test(variant.player) ? 'Ashdi' : /moon/i.test(variant.player) ? 'Moon' : variant.player;
                     return {label: voiceLabel(variant), player: player, episodes: variant.episodes,
                         supported: player === 'Ashdi' || player === 'Moon' || variant.episodes.every(function (e) { return media(e.url); })};
                 });
-                var wantedVoice = saved(key).voice, wantedPlayer = saved(key).player;
-                voiceIndex = voices.findIndex(function (v) { return v.label === wantedVoice && (!wantedPlayer || v.player === wantedPlayer) && v.supported; });
-                if (voiceIndex < 0) voiceIndex = voices.findIndex(function (v) { return v.supported && v.player === 'Ashdi'; });
-                if (voiceIndex < 0) voiceIndex = voices.findIndex(function (v) { return v.supported; });
+                var firstAshdi = voices.filter(function (v) { return v.supported && v.player === 'Ashdi'; })[0];
+                var firstWorking = firstAshdi || voices.filter(function (v) { return v.supported; })[0];
+                var wantedVoice = saved(key).voice;
+                voiceIndex = voices.some(function (v) { return v.label === wantedVoice && v.supported; }) ? voiceFor(wantedVoice) : -1;
+                if (voiceIndex < 0 && firstWorking) voiceIndex = voiceFor(firstWorking.label);
                 if (voiceIndex < 0) voiceIndex = 0;
                 self.focusEpisode = !keepFocusOnSeasons;
                 self.draw();
@@ -1976,6 +2062,7 @@
         this.destroy = function () {
             closed = true;
             if (moonWatchStop) moonWatchStop();
+            if (moonQualityStop) moonQualityStop();
             if (playbackListener && Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('start', playbackListener);
             try { scroll.destroy(); } catch (e) {}
             if (html) html.remove();
@@ -2024,6 +2111,11 @@
                 component: 'anitube',
                 param: {name: 'anitube_russian', type: 'trigger', 'default': false},
                 field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria (російська озвучка, вищий бітрейт).'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_auto_quality', type: 'trigger', 'default': true},
+                field: {name: 'Знижувати якість Moon при поганому зв\'язку', description: 'Увімкнено: якщо відео зависає, якість падає на один крок. Вимкнено: завжди максимальна якість. Лише для Moon на ТВ.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
