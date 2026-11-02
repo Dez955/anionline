@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.4';
+    var VERSION = '1.8.5';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -123,7 +123,7 @@
     function moonPage(value) {
         try {
             var u = new URL(value);
-            return u.protocol === 'https:' && /^(?:www\.)?moonanime\.(net|art)$/.test(u.hostname) && !u.port && !u.search && !u.hash && !u.username && !u.password && /^\/iframe\/[a-zA-Z0-9_-]{5,100}\/?$/.test(u.pathname);
+            return u.protocol === 'https:' && /^(?:www\.)?moonanime\.(net|art)$/.test(u.hostname) && !u.port && !u.search && !u.hash && !u.username && !u.password && /^\/(?:iframe|vod)\/[a-zA-Z0-9_-]{5,100}\/?$/.test(u.pathname);
         } catch (e) { return false; }
     }
     function jsString(literal) {
@@ -145,38 +145,56 @@
         try { return decodeURIComponent(binary.split('').map(function (c) { return '%' + ('0' + c.charCodeAt(0).toString(16)).slice(-2); }).join('')); }
         catch (e) { return binary; }
     }
+    function moonMedia(value) {
+        try {
+            var u = new URL(value);
+            return media(value) && !u.username && !u.password && !u.port && /^[a-z0-9.-]+$/i.test(u.hostname) && !/^(?:localhost|\d+\.\d+\.\d+\.\d+)$/.test(u.hostname);
+        } catch (e) { return false; }
+    }
+    // A player may expose one master URL or an explicit [1080p]URL,[720p]URL list.
+    function moonSources(value) {
+        var input = String(value || '').trim(), result = [];
+        if (moonMedia(input)) return [{url: input, quality: 0}];
+        input.split(/,(?=\s*\[[^\]]+\])/).forEach(function (part) {
+            var m = part.trim().match(/^\[(\d{3,4})p?\]\s*(https:\/\/\S+)$/i);
+            if (m && +m[1] <= 4320 && moonMedia(m[2])) result.push({url: m[2], quality: +m[1]});
+        });
+        return result.sort(function (a, b) { return b.quality - a.quality; });
+    }
     function moonConfig(html) {
         var raw = String(html || '');
         if (raw.length > 3000000) return null;
-        var code = raw, encoded, found;
-        // The rolling XOR wrapper carries its own bytes in the public player page.
+        var code = raw, encoded;
         var wrappers = /atob\(\s*["']([A-Za-z0-9+/=]+)["']\s*\)/g;
+        // Both public-page wrapper generations are data transforms, never script execution.
+        function unwrap(bytes, modern) {
+            var offset = modern ? 33 : 32, output = '', previous = bytes.charCodeAt(0);
+            if (bytes.length <= offset) return '';
+            for (var i = offset; i < bytes.length; i++) {
+                var b = bytes.charCodeAt(i), k = bytes.charCodeAt((modern ? 1 : 0) + (i - offset) % 32);
+                output += String.fromCharCode(b ^ k ^ (modern ? previous : 0));
+                previous = (b + k) & 255;
+            }
+            return utf8(output);
+        }
         while ((encoded = wrappers.exec(raw))) {
             if (encoded[1].length > 1500000) continue;
             try {
-                var bytes = atob(encoded[1]), out = '', previous = bytes.charCodeAt(0);
-                if (bytes.length <= 33) continue;
-                for (var i = 33; i < bytes.length; i++) {
-                    var b = bytes.charCodeAt(i), k = bytes.charCodeAt(1 + (i - 33) % 32);
-                    out += String.fromCharCode(b ^ k ^ previous); previous = (b + k) & 255;
-                }
-                out = utf8(out);
-                if (/Playerjs\s*\(/.test(out)) { code = out; break; }
+                var bytes = atob(encoded[1]);
+                var modern = unwrap(bytes, true), legacy = unwrap(bytes, false);
+                var recognised = function (value) { return /Playerjs\s*\(|\brawVideo\s*=|\bfile\s*:/.test(value); };
+                if (recognised(modern)) { code = modern; break; }
+                if (recognised(legacy)) { code = legacy; break; }
             } catch (e) { /* not a recognised wrapper */ }
         }
-        // Parse only the small subset of values used by the player, without eval/Function.
-        function field(name) {
-            var pattern = new RegExp('(?:[,{]\\s*)(?:["\']?' + name + '["\']?)\\s*:\\s*((?:"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\')|[A-Za-z_$][\\w$]*\\(\\s*(?:"[A-Za-z0-9+/=]+"|\'[A-Za-z0-9+/=]+\')\\s*\\))');
-            var m = code.match(pattern);
-            if (!m) return '';
-            var value = m[1];
+        function decodeValue(value) {
             if (/^["']/.test(value)) return jsString(value);
             var call = value.match(/^([A-Za-z_$][\w$]*)\(\s*(["'])([A-Za-z0-9+/=]+)\2\s*\)$/);
             if (!call) return '';
             var escaped = call[1].replace(/[$]/g, '\\$');
             var body = code.match(new RegExp('function\\s+' + escaped + '\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{([^}]{1,4000})\\}'));
             var key = body && body[1].match(/(?:var|let|const)\s+\w+\s*=\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/);
-            if (!key) return '';
+            if (!key) return ''; // no borrowed/static fallback keys; only bytes carried by this page
             key = jsString(key[1]);
             if (!key || key.length > 1000) return '';
             try {
@@ -186,13 +204,25 @@
                 return utf8(result);
             } catch (e) { return ''; }
         }
-        found = field('file');
-        try {
-            var stream = new URL(found);
-            if (!media(found) || stream.username || stream.password || stream.port || !/^[a-z0-9.-]+$/i.test(stream.hostname) || /^(?:localhost|\d+\.\d+\.\d+\.\d+)$/.test(stream.hostname)) return null;
-            var subtitles = subtitleList(field('subtitle'), stream.hostname).concat(subtitleList(field('subtitle'), 'moonanime.net'), subtitleList(field('subtitle'), 'moonanime.art'));
-            return {url: stream.href, subtitles: subtitles};
-        } catch (e) { return null; }
+        // Read literal/call values in either old Playerjs fields or modern rawVideo/rawSubtitle variables.
+        function field(name, variable) {
+            var valuePattern = '("(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|[A-Za-z_$][\\w$]*\\(\\s*(?:"[A-Za-z0-9+/=]+"|\'[A-Za-z0-9+/=]+\')\\s*\\))';
+            var patterns = [new RegExp('\\b(?:var|let|const)\\s+' + variable + '\\s*=\\s*' + valuePattern),
+                new RegExp('[,{]\\s*["\']?' + name + '["\']?\\s*:\\s*' + valuePattern)];
+            for (var i = 0; i < patterns.length; i++) {
+                var m = code.match(patterns[i]);
+                if (m) { var value = decodeValue(m[1]); if (value) return value; }
+            }
+            return '';
+        }
+        var sources = moonSources(field('file', 'rawVideo'));
+        if (!sources.length) return null;
+        var host = new URL(sources[0].url).hostname, subtitles = [], seen = {};
+        var caption = field('subtitle', 'rawSubtitle');
+        [host, 'moonanime.net', 'moonanime.art'].forEach(function (domain) {
+            subtitleList(caption, domain).forEach(function (item) { if (!seen[item.url]) { seen[item.url] = true; subtitles.push(item); } });
+        });
+        return {url: sources[0].url, quality: sources[0].quality, sources: sources, subtitles: subtitles};
     }
     function moonFailure(xhr, viaProxy) {
         var status = xhr && xhr.status, upstream = 0;
@@ -213,7 +243,7 @@
         function read(html) {
             var config = moonConfig(html);
             if (!config) return failure('Moon: сторінка не містить підтримуваної конфігурації відео. Спробуй Ashdi або іншу серію.');
-            success(config.url, config.subtitles);
+            success(config.url, config.subtitles, config.quality);
         }
         function proxy() {
             $.ajax({url: homeUrl(homeProxy(), 'moon', 'url', url), dataType: 'text', timeout: 20000, success: read,
@@ -1334,6 +1364,7 @@
                 (function (job) {
                     var entry = job.entry;
                     function finish(info) {
+                        if (info && !info.height && entry.quality) info = {height: entry.quality, bandwidth: 0};
                         if (info) qualityCache[entry.url] = info;
                         entry.quality = info ? info.height : 0;
                         if (!closed && job.current === token && job.update) job.update(entry.quality);
@@ -1733,7 +1764,7 @@
             if (source === 'dorama') return doramaStream(entry.ref, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (source === 'animeon') return animeonStream(entry.ref, entry.wantSubtitles, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (media(entry.url)) return success(entry.stream = entry.url);
-            if (moonPage(entry.url)) return moonStream(entry.url, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
+            if (moonPage(entry.url)) return moonStream(entry.url, function (stream, subtitles, quality) { entry.subtitles = subtitles; entry.quality = quality || entry.quality || 0; success(entry.stream = stream); }, failure);
             if (!ashdiPage(entry.url)) return failure('плеєр не підтримується');
             ashdiStream(entry.url, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
         };

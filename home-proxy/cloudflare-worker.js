@@ -219,7 +219,7 @@ async function doramaPlayer(params) {
 async function moonPage(raw) {
   let page;
   try { page = new URL(raw); } catch { return json({ error: 'invalid_moon_page' }, 400); }
-  if (page.protocol !== 'https:' || !/^(?:www\.)?moonanime\.(net|art)$/.test(page.hostname) || page.port || page.search || page.hash || page.username || page.password || !/^\/iframe\/[a-zA-Z0-9_-]{5,100}\/?$/.test(page.pathname)) return json({ error: 'invalid_moon_page' }, 400);
+  if (page.protocol !== 'https:' || !/^(?:www\.)?moonanime\.(net|art)$/.test(page.hostname) || page.port || page.search || page.hash || page.username || page.password || !/^\/(?:iframe|vod)\/[a-zA-Z0-9_-]{5,100}\/?$/.test(page.pathname)) return json({ error: 'invalid_moon_page' }, 400);
   return html(await read(await get(page.href)));
 }
 
