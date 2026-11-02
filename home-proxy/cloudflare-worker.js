@@ -7,6 +7,7 @@
 //   GET /search?q=<text>&key=<key>     AniTube search page (HTML)
 //   GET /playlist?url=<page>&key=<key> one AniTube show's playlist (JSON)
 //   GET /moon?url=<page>&key=<key>     a public moonanime.net/art iframe page
+//   GET /animeon?id=<episode>&key=<key>  the Ashdi page of one AnimeOn episode
 //   GET /embed?url=<page>&key=<key>    an Ashdi player page (https://ashdi.vip/vod/<id>) or show page (https://ashdi.vip/serial/<id>)
 //
 // Second source, uafix.net (same rules: only these addresses, no redirects, nothing stored). uafix refuses Cloudflare's servers (HTTP 403),
@@ -21,6 +22,11 @@
 // (https://w.davidog.top/<id>?ep=<n>&track=<n>) lists the voices and holds the stream address in plain text; it sends no CORS header.
 //   GET /dorama/player?id=<n>&ep=<n>&track=<n>&key=<key>  that player page (HTML); ep and track are optional
 //
+// UA Serials catalogue and HDVB player pages (the HLS media remains a direct stream from the source).
+//   GET /uaserials/search?q=<text>&key=<key>   UA Serials search page (HTML)
+//   GET /uaserials/page?url=<page>&key=<key>   one UA Serials title page (HTML)
+//   GET /uaserials/player?url=<page>&key=<key> one public HDVB iframe page (HTML)
+//
 // Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
 // from somewhere Ashdi accepts, add a plain-text variable EMBED_URL = the address of the bot's proxy, e.g.
 // https://<service>.koyeb.app/anitube : /embed is then relayed there with the same ACCESS_KEY. Search and playlist stay here.
@@ -29,6 +35,7 @@
 // If a site refuses the request, the answer is HTTP 424 with {"error": "HTTP 403"} (or similar) so the reason is visible.
 
 const SITE = 'https://anitube.in.ua';
+const UASERIALS = 'https://uaserials.my';
 const USER_AGENT = 'AniTubeLampaProxy/1.0 (personal Lampa plugin helper)';
 const MAX_BODY = 3_000_000;
 const MIN_KEY_LENGTH = 16;
@@ -200,6 +207,32 @@ async function ufEmbed(raw) {
   return html(text);
 }
 
+const UASERIALS_PAGE = /^\/[0-9]{1,8}-[a-z0-9-]+\.html$/i;
+const UASERIALS_PLAYER = /^\/embed\/[0-9]{1,10}\/[a-f0-9]{6,64}$/i;
+
+async function uaserialsSearch(query) {
+  if (!query || query.length > 200) return json({ error: 'invalid_query' }, 400);
+  const url = new URL('/index.php', UASERIALS);
+  url.searchParams.set('do', 'search');
+  url.searchParams.set('subaction', 'search');
+  url.searchParams.set('story', query);
+  return html(await read(await get(url.href, UASERIALS + '/')));
+}
+
+async function uaserialsPage(raw) {
+  const page = validPage(raw, 'uaserials.my', UASERIALS_PAGE);
+  if (!page) return null;
+  return read(await get(page, UASERIALS + '/'));
+}
+
+async function uaserialsPlayer(raw) {
+  const page = validPage(raw, 'hdvbua.pro', UASERIALS_PLAYER);
+  if (!page) return null;
+  return read(await fetch(page, { redirect: 'manual', headers: {
+    'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Referer': UASERIALS + '/'
+  } }));
+}
+
 const DORAMA_PLAYER = 'https://w.davidog.top';
 
 // The address is built here from three numbers, so no other path or host can be requested through it.
@@ -228,6 +261,19 @@ async function moonPage(raw) {
   return html(text);
 }
 
+// AnimeOn's public answer for one episode: only the Ashdi page address goes back.
+async function animeonEpisode(id) {
+  if (!/^\d{1,10}$/.test(id)) return json({ error: 'invalid_animeon_id' }, 400);
+  const response = await fetch('https://animeon.club/api/player/' + id + '/episode', { redirect: 'manual', signal: AbortSignal.timeout(8000), headers: {
+    'User-Agent': USER_AGENT, 'Accept': 'application/json'
+  } });
+  const text = await read(response);
+  let page;
+  try { page = new URL(JSON.parse(text).videoUrl); } catch { throw new UpstreamError('AnimeOn не дав адресу плеєра'); }
+  if (page.protocol !== 'https:' || page.hostname !== 'ashdi.vip' || !/^\/vod\/\d+$/.test(page.pathname)) throw new UpstreamError('AnimeOn не дав адресу плеєра');
+  return json({ videoUrl: page.origin + page.pathname });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: HEADERS });
@@ -241,6 +287,7 @@ export default {
       if (url.pathname === '/search') return await search((url.searchParams.get('q') || '').trim());
       if (url.pathname === '/playlist') return await playlist(url.searchParams.get('url') || '');
       if (url.pathname === '/moon') return await moonPage(url.searchParams.get('url') || '');
+      if (url.pathname === '/animeon') return await animeonEpisode(url.searchParams.get('id') || '');
       if (url.pathname === '/embed') return await embed(url.searchParams.get('url') || '', env);
       if (['/uf/search', '/uf/page', '/uf/episode'].includes(url.pathname)) {
         const relayed = await ufRelay(url.pathname.slice(4), url, env);
@@ -259,6 +306,15 @@ export default {
       }
       if (url.pathname === '/uf/embed') return await ufEmbed(url.searchParams.get('url') || '');
       if (url.pathname === '/dorama/player') return await doramaPlayer(url.searchParams);
+      if (url.pathname === '/uaserials/search') return await uaserialsSearch((url.searchParams.get('q') || '').trim());
+      if (url.pathname === '/uaserials/page') {
+        const text = await uaserialsPage(url.searchParams.get('url') || '');
+        return text === null ? json({ error: 'invalid_uaserials_page' }, 400) : html(text);
+      }
+      if (url.pathname === '/uaserials/player') {
+        const text = await uaserialsPlayer(url.searchParams.get('url') || '');
+        return text === null ? json({ error: 'invalid_uaserials_player' }, 400) : html(text);
+      }
       return json({ error: 'not_found' }, 404);
     } catch (error) {
       const message = error instanceof UpstreamError ? error.message : (error && error.name) || 'upstream_error';
