@@ -6,7 +6,20 @@
 //
 //   GET /search?q=<text>&key=<key>     AniTube search page (HTML)
 //   GET /playlist?url=<page>&key=<key> one AniTube show's playlist (JSON)
-//   GET /embed?url=<page>&key=<key>    an Ashdi player page (https://ashdi.vip/vod/<id>)
+//   GET /moon?url=<page>&key=<key>     a public moonanime.net/art iframe page
+//   GET /embed?url=<page>&key=<key>    an Ashdi player page (https://ashdi.vip/vod/<id>) or show page (https://ashdi.vip/serial/<id>)
+//
+// Second source, uafix.net (same rules: only these addresses, no redirects, nothing stored). uafix refuses Cloudflare's servers (HTTP 403),
+// so when EMBED_URL is set, /uf/search, /uf/page and /uf/episode are relayed to the bot's /uf/* routes (same ACCESS_KEY) the way /embed is.
+// /uf/embed (the zetvideo player page) is fetched here directly.
+//   GET /uf/search?q=<text>&key=<key>   uafix search page (HTML)
+//   GET /uf/page?url=<page>&key=<key>   a show page or an episode page of uafix (HTML)
+//   GET /uf/episode?url=<page>&key=<key> {"player": "https://zetvideo.net/vod/<id>"} taken from an episode page (a small answer)
+//   GET /uf/embed?url=<page>&key=<key>  a zetvideo player page (https://zetvideo.net/vod/<id>)
+//
+// Third source, DoramaUA (its API at api.doramaua.tv is open to browsers, so only the player page needs this helper). The player page
+// (https://w.davidog.top/<id>?ep=<n>&track=<n>) lists the voices and holds the stream address in plain text; it sends no CORS header.
+//   GET /dorama/player?id=<n>&ep=<n>&track=<n>&key=<key>  that player page (HTML); ep and track are optional
 //
 // Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
 // from somewhere Ashdi accepts, add a plain-text variable EMBED_URL = the address of the bot's proxy, e.g.
@@ -62,10 +75,10 @@ async function read(response) {
   return text;
 }
 
-function get(url) {
+function get(url, referer = SITE + '/') {
   return fetch(url, {
     redirect: 'manual',
-    headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Referer': SITE + '/' }
+    headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Referer': referer }
   });
 }
 
@@ -119,7 +132,7 @@ async function playlist(raw) {
 const GEO_BLOCK = 'Змініть країну перегляду';
 
 async function embed(raw, env) {
-  const page = validPage(raw, 'ashdi.vip', /^\/vod\/\d+$/);
+  const page = validPage(raw, 'ashdi.vip', /^\/(?:vod|serial)\/\d+$/);
   if (!page) return json({ error: 'invalid_player_page' }, 400);
   const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
   let text;
@@ -140,6 +153,76 @@ async function embed(raw, env) {
   return html(text);
 }
 
+const UAFIX = 'https://uafix.net';
+const UAFIX_PAGE = /^\/[a-z-]+\/[a-z0-9-]+\/(?:season-\d+-episode-\d+\/)?$/;
+
+// Sends a uafix request to the bot (EMBED_URL) and returns its answer as is, or null when no relay is configured.
+async function ufRelay(path, url, env) {
+  const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
+  if (!/^https:\/\/\S+$/.test(relay)) return null;
+  const target = relay + '/uf/' + path + '?' + url.searchParams.toString().replace(/(^|&)key=[^&]*/g, '') + '&key=' + encodeURIComponent(String(env.ACCESS_KEY).trim());
+  const response = await fetch(target, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT } });
+  const body = await response.text();
+  if (!response.ok) {
+    let reason = 'HTTP ' + response.status;
+    try { reason = JSON.parse(body).error || reason; } catch { /* keep the status */ }
+    throw new UpstreamError('ретрансляція uafix: ' + reason);
+  }
+  if (body.length > MAX_BODY) throw new UpstreamError('завелика відповідь');
+  return reply(body, 200, response.headers.get('Content-Type') || 'text/plain; charset=utf-8');
+}
+
+async function ufSearch(query) {
+  if (!query || query.length > 200) return json({ error: 'invalid_query' }, 400);
+  const url = new URL('/index.php', UAFIX);
+  url.searchParams.set('do', 'search');
+  url.searchParams.set('subaction', 'search');
+  url.searchParams.set('story', query);
+  return html(await read(await get(url.href, UAFIX + '/')));
+}
+
+async function ufPage(raw) {
+  const page = validPage(raw, 'uafix.net', UAFIX_PAGE);
+  if (!page) return null;
+  return read(await get(page, UAFIX + '/'));
+}
+
+function ufPlayer(text) {
+  const match = text.match(/<iframe\b[^>]*\bsrc=["'](https:\/\/(?:zetvideo\.net|ashdi\.vip)\/vod\/\d+)["']/i);
+  return match ? match[1] : '';
+}
+
+async function ufEmbed(raw) {
+  const page = validPage(raw, 'zetvideo.net', /^\/vod\/\d+$/);
+  if (!page) return json({ error: 'invalid_player_page' }, 400);
+  const text = await read(await get(page, UAFIX + '/'));
+  if (/[Зз]мініть країну|not available in your country/i.test(text)) throw new UpstreamError('плеєр не пускає країну цього сервера');
+  return html(text);
+}
+
+const DORAMA_PLAYER = 'https://w.davidog.top';
+
+// The address is built here from three numbers, so no other path or host can be requested through it.
+async function doramaPlayer(params) {
+  const id = params.get('id') || '';
+  const ep = params.get('ep') || '';
+  const track = params.get('track') || '';
+  if (!/^\d{1,8}$/.test(id) || (ep && !/^\d{1,4}$/.test(ep)) || (track && !/^\d{1,6}$/.test(track))) return json({ error: 'invalid_player_page' }, 400);
+  const url = new URL('/' + id, DORAMA_PLAYER);
+  if (ep) url.searchParams.set('ep', ep);
+  if (track) url.searchParams.set('track', track);
+  const response = await fetch(url.href, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8' } });
+  return html(await read(response));
+}
+
+// Public Moon iframe pages only; no arbitrary proxy destinations or redirects.
+async function moonPage(raw) {
+  let page;
+  try { page = new URL(raw); } catch { return json({ error: 'invalid_moon_page' }, 400); }
+  if (page.protocol !== 'https:' || !/^(?:www\.)?moonanime\.(net|art)$/.test(page.hostname) || page.port || page.search || page.hash || page.username || page.password || !/^\/iframe\/[a-zA-Z0-9_-]{5,100}\/?$/.test(page.pathname)) return json({ error: 'invalid_moon_page' }, 400);
+  return html(await read(await get(page.href)));
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: HEADERS });
@@ -152,7 +235,25 @@ export default {
     try {
       if (url.pathname === '/search') return await search((url.searchParams.get('q') || '').trim());
       if (url.pathname === '/playlist') return await playlist(url.searchParams.get('url') || '');
+      if (url.pathname === '/moon') return await moonPage(url.searchParams.get('url') || '');
       if (url.pathname === '/embed') return await embed(url.searchParams.get('url') || '', env);
+      if (['/uf/search', '/uf/page', '/uf/episode'].includes(url.pathname)) {
+        const relayed = await ufRelay(url.pathname.slice(4), url, env);
+        if (relayed) return relayed;
+      }
+      if (url.pathname === '/uf/search') return await ufSearch((url.searchParams.get('q') || '').trim());
+      if (url.pathname === '/uf/page') {
+        const text = await ufPage(url.searchParams.get('url') || '');
+        return text === null ? json({ error: 'invalid_uafix_page' }, 400) : html(text);
+      }
+      if (url.pathname === '/uf/episode') {
+        const text = await ufPage(url.searchParams.get('url') || '');
+        if (text === null) return json({ error: 'invalid_uafix_page' }, 400);
+        const player = ufPlayer(text);
+        return player ? json({ player }) : json({ error: 'player_missing' }, UPSTREAM_STATUS);
+      }
+      if (url.pathname === '/uf/embed') return await ufEmbed(url.searchParams.get('url') || '');
+      if (url.pathname === '/dorama/player') return await doramaPlayer(url.searchParams);
       return json({ error: 'not_found' }, 404);
     } catch (error) {
       const message = error instanceof UpstreamError ? error.message : (error && error.name) || 'upstream_error';
