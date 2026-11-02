@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.6';
+    var VERSION = '1.8.7';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -265,6 +265,30 @@
             return !expires || expires * 1000 > Date.now() + 30000;
         } catch (e) { return false; }
     }
+    // Moon's segments need Accept and Accept-Language, which the browser sends and Tizen AVPlay cannot be given.
+    // Moon alone uses Lampa's own player with hls.js; the owner's settings return when that player closes.
+    var MOON_PLAYER_SAVED = 'anitube_moon_player_saved';
+    function restoreMoonPlayer() {
+        var saved = String(Lampa.Storage.get(MOON_PLAYER_SAVED, '') || '').split('|');
+        if (saved.length !== 2) return;
+        Lampa.Storage.set('player', saved[0], true);
+        Lampa.Storage.set('player_hls_method', saved[1], true);
+        Lampa.Storage.set(MOON_PLAYER_SAVED, '', true);
+    }
+    function useMoonPlayer() {
+        var listener = Lampa.Player.listener;
+        if (!(Lampa.Platform && Lampa.Platform.is('tizen')) || !listener || !listener.follow || !listener.remove) return;
+        if (!Lampa.Storage.get(MOON_PLAYER_SAVED, '')) {
+            Lampa.Storage.set(MOON_PLAYER_SAVED, Lampa.Storage.field('player') + '|' + Lampa.Storage.field('player_hls_method'), true);
+            listener.follow('destroy', function restore() {
+                listener.remove('destroy', restore);
+                restoreMoonPlayer();
+            });
+        }
+        Lampa.Storage.set('player', 'inner', true);
+        Lampa.Storage.set('player_hls_method', 'hlsjs', true);
+    }
+
     function moonFailure(xhr, viaProxy) {
         var status = xhr && xhr.status, upstream = 0;
         if (viaProxy && status === 424) {
@@ -1909,6 +1933,7 @@
                     };
                     playlist.push(cell);
                 });
+                if (first.anitube_moon) useMoonPlayer();
                 Lampa.Player.play(first);
                 // The playlist lets the player's next/previous buttons switch episodes without leaving it.
                 Lampa.Player.playlist(playlist);
@@ -2052,6 +2077,7 @@
     function start() {
         if (window.plugin_anitube_prototype_ready) return;
         window.plugin_anitube_prototype_ready = true;
+        restoreMoonPlayer();
         addTemplates();
         addSettings();
         // Registered up front so Lampa can restore the screen after a restart.
