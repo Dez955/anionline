@@ -220,7 +220,12 @@ async function moonPage(raw) {
   let page;
   try { page = new URL(raw); } catch { return json({ error: 'invalid_moon_page' }, 400); }
   if (page.protocol !== 'https:' || !/^(?:www\.)?moonanime\.(net|art)$/.test(page.hostname) || page.port || page.search || page.hash || page.username || page.password || !/^\/(?:iframe|vod)\/[a-zA-Z0-9_-]{5,100}\/?$/.test(page.pathname)) return json({ error: 'invalid_moon_page' }, 400);
-  return html(await read(await get(page.href)));
+  const response = await fetch(page.href, { redirect: 'manual', signal: AbortSignal.timeout(8000), headers: {
+    'User-Agent': USER_AGENT, 'Accept': '*/*', 'Accept-Language': 'uk', 'Referer': SITE + '/'
+  } });
+  const text = await read(response);
+  if (/<title>\s*Just a moment|Enable JavaScript and cookies to continue/i.test(text)) throw new UpstreamError('Moon вимагає перевірку браузера');
+  return html(text);
 }
 
 export default {
