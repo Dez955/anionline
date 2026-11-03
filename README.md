@@ -4,7 +4,7 @@ Published beta: **1.8.15**. Stable: **1.8.2**. AnimeOn on TVs requires the updat
 
 A Lampa plugin that adds a **🟢 AniTube** action to a card. It opens a series page (voice, season and episode chips, like the UAKino plugin's) with Ukrainian voice-overs and subtitles, and plays the episode in Lampa's player with a playlist, so next/previous episode work.
 
-Stable version: **1.8.2**. Test beta: **1.8.9**.
+Stable version: **1.8.2**. Test beta: **1.8.15**.
 
 Beta installation and limitations: [BETA.md](BETA.md). Main `anitube.js` remains unchanged.
 
