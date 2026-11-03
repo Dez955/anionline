@@ -1,12 +1,12 @@
-/* AniTube for Lampa 1.0. Sources: AniTube, AnimeOn (through a public Lampa-plugin aggregator), uafix. Series page laid out like the UAKino plugin's.
+/* AniTube for Lampa. Sources: AniTube, Makhno, AnimeOn, UAflix, DoramaUA, AniLibria. Series page laid out like the UAKino plugin's.
    No provider scripts are executed. */
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.2';
-    var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
+    var VERSION = '1.8.19';
+    var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
     var DORAMA_AHEAD = 6, DORAMA_BEHIND = 1;
@@ -85,6 +85,371 @@
         return result;
     }
     function media(url) { return /^https:\/\//i.test(url) && /\.(m3u8|mp4|mpd|webm)(?:[?#]|$)/i.test(url); }
+
+    function episodeDate(value) {
+        var m = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/);
+        if (!m) return '';
+        var y = +m[1], month = +m[2], day = +m[3];
+        var days = [31, y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        return y >= 1900 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1] ? m[3] + '.' + m[2] + '.' + m[1] : '';
+    }
+    function hlsInfo(value, base) {
+        var best = {height: 0, bandwidth: 0}, qualities = {}, rates = {}, pending = null;
+        var lines = String(value || '').slice(0, 1000000).split(/\r?\n/);
+        if (!/^#EXTM3U/.test(lines[0] || '')) return best;
+        // A variant URL alone would lose external audio/subtitle groups. Keep such masters intact.
+        var externalTracks = lines.some(function (line) { return /^#EXT-X-MEDIA:/.test(line) && /(?:[:,])\s*URI=/.test(line); });
+        lines.forEach(function (line) {
+            line = line.trim();
+            if (!line) return;
+            if (!/^#EXT-X-STREAM-INF:/.test(line)) {
+                if (line.charAt(0) !== '#' && pending) {
+                    var url = absolute(line, base), label = pending.height + 'p';
+                    if (base && !externalTracks && pending.height && media(url) && /\.m3u8(?:[?#]|$)/i.test(url) &&
+                        !new URL(url).username && !new URL(url).password && (!qualities[label] || pending.bandwidth > rates[label])) {
+                        qualities[label] = url; rates[label] = pending.bandwidth;
+                    }
+                    pending = null;
+                }
+                return;
+            }
+            var size = line.match(/(?:[:,])\s*RESOLUTION=(\d+)x(\d+)/i);
+            var rate = line.match(/(?:[:,])\s*BANDWIDTH=(\d+)/i);
+            var height = size ? +size[2] : 0;
+            pending = {height: height, bandwidth: rate ? +rate[1] : 0};
+            if (height > best.height || (height === best.height && pending.bandwidth > best.bandwidth)) best = pending;
+        });
+        best.qualities = qualities;
+        return best;
+    }
+    function playbackFile(stream, info, adaptive) {
+        var qualities = info && info.qualities;
+        var names = Object.keys(qualities || {}).sort(function (a, b) { return parseInt(b, 10) - parseInt(a, 10); });
+        if (!names.length) return {url: stream};
+        var choices = {};
+        if (adaptive) choices.AUTO = {url: stream, call: function (item, done) { done(stream); }};
+        names.forEach(function (name, index) {
+            var url = qualities[name];
+            // Lampa's documented quality callbacks keep manual selection, while a saved global 480p
+            // preference cannot replace this episode's maximum start. No global setting is changed.
+            choices[name] = {call: function (item, done) { done(url); }};
+            if (!index && !adaptive) choices[name].url = url;
+        });
+        return {url: adaptive ? stream : qualities[names[0]], quality: choices};
+    }
+    // Lampa otherwise runs a second HLS parser even when a native stream is already prepared.
+    // The public change_quality argument skips that parser, without changing the video engine.
+    var nativePlayback = null;
+    function useNativePlayback(owner) {
+        var player = Lampa.PlayerVideo;
+        if (!player || typeof player.url !== 'function') return;
+        if (nativePlayback) { nativePlayback.owner = owner; return; }
+        var state = {player: player, original: player.url, owner: owner};
+        state.wrapper = function (url, changed) {
+            var work = Lampa.Player.playdata && Lampa.Player.playdata();
+            var prepared = state.owner && work && work.anitube_owner === state.owner && work.anitube_native_prepared && work.url === url;
+            return state.original.call(this, url, prepared ? true : changed);
+        };
+        nativePlayback = state; player.url = state.wrapper;
+    }
+    function restoreNativePlayback(owner) {
+        var state = nativePlayback;
+        if (!state || state.owner !== owner) return;
+        state.owner = '';
+        if (state.player.url === state.wrapper) state.player.url = state.original;
+        nativePlayback = null;
+    }
+    function streamInfo(url, done) {
+        if (!media(url) || !/\.m3u8(?:[?#]|$)/i.test(url)) return done({height: 0, bandwidth: 0});
+        var finished = false;
+        var timer = setTimeout(function () { finish({height: 0, bandwidth: 0}); }, 8000);
+        function finish(info) { if (finished) return; finished = true; clearTimeout(timer); done(info); }
+        function read(value) { finish(hlsInfo(value, url)); }
+        if (window.Lampa && Lampa.Platform && Lampa.Platform.is('android')) {
+            direct(url, {dataType: 'text'}, read, function () { finish({height: 0, bandwidth: 0}); });
+        } else {
+            $.ajax({url: url, dataType: 'text', timeout: 7000, success: read, error: function () { finish({height: 0, bandwidth: 0}); }});
+        }
+    }
+
+    // Moon configuration is read as data. Never evaluate downloaded JavaScript.
+    function moonPage(value) {
+        try {
+            var u = new URL(value);
+            return u.protocol === 'https:' && /^(?:www\.)?moonanime\.(net|art)$/.test(u.hostname) && !u.port && !u.search && !u.hash && !u.username && !u.password && /^\/(?:iframe|vod)\/[a-zA-Z0-9_-]{5,100}\/?$/.test(u.pathname);
+        } catch (e) { return false; }
+    }
+    function jsString(literal) {
+        var quote = literal.charAt(0), out = '';
+        if ((quote !== '"' && quote !== "'") || literal.charAt(literal.length - 1) !== quote) return '';
+        for (var i = 1; i < literal.length - 1; i++) {
+            var c = literal.charAt(i);
+            if (c !== '\\') { out += c; continue; }
+            c = literal.charAt(++i);
+            if (c === 'u' || c === 'x') {
+                var n = c === 'u' ? 4 : 2, digits = literal.substr(i + 1, n);
+                if (!new RegExp('^[a-fA-F0-9]{' + n + '}$').test(digits)) return '';
+                out += String.fromCharCode(parseInt(digits, 16)); i += n;
+            } else out += ({n: '\n', r: '\r', t: '\t', b: '\b', f: '\f'})[c] || c;
+        }
+        return out;
+    }
+    function utf8(binary) {
+        try { return decodeURIComponent(binary.split('').map(function (c) { return '%' + ('0' + c.charCodeAt(0).toString(16)).slice(-2); }).join('')); }
+        catch (e) { return binary; }
+    }
+    function moonMedia(value) {
+        try {
+            var u = new URL(value);
+            return media(value) && !u.username && !u.password && !u.port && /^[a-z0-9.-]+$/i.test(u.hostname) && !/^(?:localhost|\d+\.\d+\.\d+\.\d+)$/.test(u.hostname);
+        } catch (e) { return false; }
+    }
+    // A player may expose one master URL or an explicit [1080p]URL,[720p]URL list.
+    function moonSources(value) {
+        var input = String(value || '').trim(), result = [];
+        if (moonMedia(input)) return [{url: input, quality: 0}];
+        input.split(/,(?=\s*\[[^\]]+\])/).forEach(function (part) {
+            var m = part.trim().match(/^\[(\d{3,4})p?\]\s*(https:\/\/\S+)$/i);
+            if (m && +m[1] <= 4320 && moonMedia(m[2])) result.push({url: m[2], quality: +m[1]});
+        });
+        return result.sort(function (a, b) { return b.quality - a.quality; });
+    }
+    function moonConfig(html) {
+        var raw = String(html || '');
+        if (raw.length > 3000000) return null;
+        var code = raw, encoded;
+        var wrappers = /atob\(\s*["']([A-Za-z0-9+/=]+)["']\s*\)/g;
+        // Both public-page wrapper generations are data transforms, never script execution.
+        function unwrap(bytes, modern) {
+            var offset = modern ? 33 : 32, output = '', previous = bytes.charCodeAt(0);
+            if (bytes.length <= offset) return '';
+            for (var i = offset; i < bytes.length; i++) {
+                var b = bytes.charCodeAt(i), k = bytes.charCodeAt((modern ? 1 : 0) + (i - offset) % 32);
+                output += String.fromCharCode(b ^ k ^ (modern ? previous : 0));
+                previous = (b + k) & 255;
+            }
+            return utf8(output);
+        }
+        while ((encoded = wrappers.exec(raw))) {
+            if (encoded[1].length > 1500000) continue;
+            try {
+                var bytes = atob(encoded[1]);
+                var modern = unwrap(bytes, true), legacy = unwrap(bytes, false);
+                var recognised = function (value) { return /Playerjs\s*\(|\brawVideo\s*=|\bfile\s*:/.test(value); };
+                if (recognised(modern)) { code = modern; break; }
+                if (recognised(legacy)) { code = legacy; break; }
+            } catch (e) { /* not a recognised wrapper */ }
+        }
+        function decodeValue(value) {
+            if (/^["']/.test(value)) return jsString(value);
+            var call = value.match(/^([A-Za-z_$][\w$]*)\(\s*(["'])([A-Za-z0-9+/=]+)\2\s*\)$/);
+            if (!call) return '';
+            var escaped = call[1].replace(/[$]/g, '\\$');
+            var body = code.match(new RegExp('function\\s+' + escaped + '\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{([^}]{1,4000})\\}'));
+            var key = body && body[1].match(/(?:var|let|const)\s+\w+\s*=\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/);
+            if (!key) return ''; // no borrowed/static fallback keys; only bytes carried by this page
+            key = jsString(key[1]);
+            if (!key || key.length > 1000) return '';
+            try {
+                key = unescape(encodeURIComponent(key));
+                var encrypted = atob(call[3]), result = '';
+                for (var j = 0; j < encrypted.length; j++) result += String.fromCharCode(encrypted.charCodeAt(j) ^ key.charCodeAt(j % key.length));
+                return utf8(result);
+            } catch (e) { return ''; }
+        }
+        // Read literal/call values in either old Playerjs fields or modern rawVideo/rawSubtitle variables.
+        function field(name, variable) {
+            var valuePattern = '("(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|[A-Za-z_$][\\w$]*\\(\\s*(?:"[A-Za-z0-9+/=]+"|\'[A-Za-z0-9+/=]+\')\\s*\\))';
+            var patterns = [new RegExp('\\b(?:var|let|const)\\s+' + variable + '\\s*=\\s*' + valuePattern),
+                new RegExp('[,{]\\s*["\']?' + name + '["\']?\\s*:\\s*' + valuePattern)];
+            for (var i = 0; i < patterns.length; i++) {
+                var m = code.match(patterns[i]);
+                if (m) { var value = decodeValue(m[1]); if (value) return value; }
+            }
+            return '';
+        }
+        var sources = moonSources(field('file', 'rawVideo'));
+        if (!sources.length) return null;
+        var host = new URL(sources[0].url).hostname, subtitles = [], seen = {};
+        var caption = field('subtitle', 'rawSubtitle');
+        [host, 'moonanime.net', 'moonanime.art'].forEach(function (domain) {
+            subtitleList(caption, domain).forEach(function (item) { if (!seen[item.url]) { seen[item.url] = true; subtitles.push(item); } });
+        });
+        return {url: sources[0].url, quality: sources[0].quality, sources: sources, subtitles: subtitles};
+    }
+    function browserChallenge(value) {
+        var text = String(value || '').slice(0, 200000);
+        return /<title>\s*Just a moment|Enable JavaScript and cookies to continue|cf-chl-widget/i.test(text);
+    }
+    // Observe the actual TV player, rather than treating an HLS address as proof of playback.
+    function watchMoonPlayback(work, report, onReady) {
+        var listener = Lampa.PlayerVideo && Lampa.PlayerVideo.listener;
+        if (!listener || !listener.follow || !listener.remove) return function () {};
+        var ended = false;
+        var prefix = work.anitube_moon === false ? 'AT-P' : 'AT-M';
+        var timer = setTimeout(function () { fail(prefix + '4', 'Плеєр не почав відтворення за 25 секунд. Спробуй інший плеєр.'); }, 25000);
+        function stop() {
+            if (ended) return;
+            ended = true; clearTimeout(timer);
+            listener.remove('canplay', ready); listener.remove('timeupdate', progress); listener.remove('error', error);
+            if (Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('destroy', stop);
+        }
+        function ready() { if (!ended) { stop(); report('', ''); if (onReady) onReady(); } }
+        function progress(event) { if (event && Number(event.currentTime || event.time) > 0) ready(); }
+        function fail(code, message) {
+            if (ended) return;
+            stop();
+            var current = Lampa.Player.playdata && Lampa.Player.playdata();
+            if (current && current.anitube_owner === work.anitube_owner && current.url === work.url && Lampa.Player.close) Lampa.Player.close();
+            report(code, message);
+        }
+        function error(event) {
+            if (!event || !event.fatal) return;
+            var detail = String(event.error || event.details || '');
+            var reason = /manifest/i.test(detail) ? 'Не завантажився список відеопотоку.' : 'Хостинг не віддав відео або його фрагмент.';
+            fail(prefix + '3', reason + ' Спробуй інший плеєр.');
+        }
+        listener.follow('canplay', ready); listener.follow('timeupdate', progress); listener.follow('error', error);
+        if (Lampa.Player.listener && Lampa.Player.listener.follow) Lampa.Player.listener.follow('destroy', stop);
+        return stop;
+    }
+
+    function moonStreamFresh(entry) {
+        if (!entry.streamAt || Date.now() - entry.streamAt > 120000) return false;
+        try {
+            var expires = Number(new URL(entry.stream).searchParams.get('expires'));
+            return !expires || expires * 1000 > Date.now() + 30000;
+        } catch (e) { return false; }
+    }
+    // Moon's segments need Accept and Accept-Language, which the browser sends and a TV's native player cannot be given.
+    // Moon alone uses Lampa's own player with hls.js; the owner's settings return when that player closes.
+    var MOON_PLAYER_SAVED = 'anitube_moon_player_saved';
+    function restoreMoonPlayer() {
+        var saved = String(Lampa.Storage.get(MOON_PLAYER_SAVED, '') || '').split('|');
+        if (saved.length < 2) return;
+        Lampa.Storage.set('player', saved[0], true);
+        Lampa.Storage.set('player_hls_method', saved[1], true);
+        if (saved[2]) Lampa.Storage.set('video_quality_default', saved[2], true);
+        Lampa.Storage.set(MOON_PLAYER_SAVED, '', true);
+    }
+    function tvPlatform() { return !!(Lampa.Platform && (Lampa.Platform.is('tizen') || Lampa.Platform.is('webos'))); }
+    function useMoonPlayer() {
+        var listener = Lampa.Player.listener;
+        if (!tvPlatform() || !listener || !listener.follow || !listener.remove) return;
+        if (!Lampa.Storage.get(MOON_PLAYER_SAVED, '')) {
+            Lampa.Storage.set(MOON_PLAYER_SAVED, [Lampa.Storage.field('player'), Lampa.Storage.field('player_hls_method'), Lampa.Storage.field('video_quality_default')].join('|'), true);
+            listener.follow('destroy', function restore() {
+                listener.remove('destroy', restore);
+                restoreMoonPlayer();
+            });
+        }
+        Lampa.Storage.set('player', 'inner', true);
+        Lampa.Storage.set('player_hls_method', 'hlsjs', true);
+        Lampa.Storage.set('video_quality_default', '1080', true);
+    }
+    function autoQualityEnabled() {
+        var value = Lampa.Storage.field('anitube_auto_quality');
+        return value !== false && value !== 'false';
+    }
+    // Moon starts at its highest quality. With the setting on, repeated or long stalls lower it one step.
+    function watchMoonQuality() {
+        var player = Lampa.PlayerVideo, listener = player && player.listener;
+        if (!listener || !listener.follow || !listener.remove || !player.video) return function () {};
+        var levels = [], video = null, timer = null, stalls = [], calm = 0, initialized = false, stopped = false;
+        function showLevel(level) {
+            var panel = Lampa.PlayerPanel;
+            if (level && panel && panel.render) panel.render().find('.player-panel__quality').text(level.title || level.height + 'p');
+        }
+        function ordered() {
+            return levels.slice().sort(function (a, b) { return (Number(b.height) || 0) - (Number(a.height) || 0); });
+        }
+        function clearStall() { clearTimeout(timer); timer = null; }
+        function lower() {
+            clearStall();
+            stalls = [];
+            calm = Date.now() + 30000;
+            var list = ordered(), next = list[Math.max(0, list.findIndex(function (level) { return level.selected; })) + 1];
+            if (!next) return;
+            next.enabled = true;
+            showLevel(next);
+            Lampa.Noty.show('Погане з\'єднання, знижую якість' + (next.title ? ' до ' + next.title : ''), {time: 6000});
+        }
+        function waiting() {
+            var now = Date.now();
+            if (timer || now < calm || !video || video.seeking || !(video.currentTime > 3) || !autoQualityEnabled()) return;
+            stalls = stalls.filter(function (time) { return now - time < 60000; });
+            stalls.push(now);
+            if (stalls.length >= 3) lower();
+            else timer = setTimeout(lower, 6000);
+        }
+        function release() {
+            if (!video) return;
+            video.removeEventListener('waiting', waiting);
+            video.removeEventListener('playing', clearStall);
+            video = null;
+        }
+        function onLevels(event) {
+            levels = (event && event.levels) || [];
+            levels.forEach(function (level) { level.quality = level.title || level.height + 'p'; });
+            var next = player.video();
+            if (next !== video && next && next.addEventListener) {
+                release();
+                video = next;
+                video.addEventListener('waiting', waiting);
+                video.addEventListener('playing', clearStall);
+            }
+            var top = ordered()[0];
+            if (top && !initialized) { top.enabled = true; initialized = true; }
+            if (Lampa.PlayerPanel && Lampa.PlayerPanel.quality) Lampa.PlayerPanel.quality(levels, '');
+            var selected = levels.filter(function (level) { return level.selected; })[0];
+            showLevel(selected);
+        }
+        function stop() {
+            if (stopped) return;
+            stopped = true;
+            clearStall();
+            release();
+            listener.remove('levels', onLevels);
+            if (Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('destroy', stop);
+        }
+        listener.follow('levels', onLevels);
+        if (Lampa.Player.listener && Lampa.Player.listener.follow) Lampa.Player.listener.follow('destroy', stop);
+        return stop;
+    }
+
+    function moonFailure(xhr, viaProxy) {
+        var status = xhr && xhr.status, upstream = 0;
+        if (viaProxy && status === 424) {
+            try {
+                var data = JSON.parse(xhr.responseText || '{}');
+                if (data.code === 'moon_relay_missing') return 'Moon: потрібно оновити хмарний помічник плеєра.';
+                var message = data.error || '';
+                upstream = Number((String(message).match(/HTTP (\d{3})/) || [])[1]) || 0;
+            } catch (e) { /* keep the relay status */ }
+        }
+        if (viaProxy && status === 404) return 'Moon: у проксі немає маршруту /moon. Потрібне оновлення Worker.';
+        if (viaProxy && status === 403) return 'Moon: проксі відмовив у доступі (HTTP 403). Перевір адресу та ключ проксі.';
+        var code = upstream || status;
+        return code ? 'Moon: не вдалося отримати сторінку плеєра (HTTP ' + code + '). Спробуй Ashdi або іншу серію.'
+            : 'Moon: немає з’єднання з плеєром. Спробуй Ashdi або іншу серію.';
+    }
+    function moonStream(url, success, failure) {
+        if (!moonPage(url)) return failure('некоректна адреса Moon');
+        function read(html) {
+            var config = moonConfig(html);
+            if (!config) return failure(browserChallenge(html) ? 'Moon: хостинг вимагає перевірку браузера. Відеоплеєр телевізора її не проходить.' : 'Moon: сторінка не містить підтримуваної конфігурації відео. Спробуй Ashdi або іншу серію.');
+            success(config.url, config.subtitles, config.quality);
+        }
+        function proxy() {
+            $.ajax({url: homeUrl(homeProxy(), 'moon', 'url', url), dataType: 'text', timeout: 20000, success: read,
+                error: function (xhr) { failure(moonFailure(xhr, true)); }});
+        }
+        if (window.Lampa && Lampa.Platform && Lampa.Platform.is('android')) {
+            direct(url, {dataType: 'text', headers: {'Accept': '*/*'}}, read, function () { proxy(); });
+        } else {
+            $.ajax({url: url, dataType: 'text', timeout: 8000, success: read, error: proxy});
+        }
+    }
 
     // ---- Network: Lampa's native request on Android first, Netlify proxy as fallback -------------------------------
     // Address of the optional home-network helper (home-proxy/server.mjs) for TVs that cannot reach AniTube themselves.
@@ -171,7 +536,7 @@
     // Added to an error about a source that needs a Ukrainian address when the device can neither ask it itself nor use a box.
     function boxHint() {
         var android = !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'));
-        return boxAddress() || android ? '' : ' На Smart TV для цього джерела потрібна домашня приставка: Налаштування → AniTube → Адреса приставки.';
+        return boxAddress() || android ? '' : ' Без приставки UAflix можна дивитися через джерело UAFilms (чип «Джерело»).';
     }
     // The box is useful on a device with no native requests; Android Lampa asks the sites itself.
     function doramaAvailable() {
@@ -240,12 +605,14 @@
             return {label: item[1].trim(), url: address};
         }).filter(Boolean);
     }
+    function ashdiMissing(html) { return String(html).indexOf('Файл не знайдено') !== -1; }
     function ashdiStream(url, success, failure) {
         function read(html, fail) {
             var match = String(html).match(/\bfile\s*:\s*(["'])(https:\/\/ashdi\.vip\/[^"']+?\.m3u8[^"']*)\1/i);
             var stream = match && absolute(match[2], url);
             if (stream && new URL(stream).hostname === 'ashdi.vip' && media(stream)) success(stream, playerSubtitles(html, 'ashdi.vip'));
             else if (String(html).indexOf('Змініть країну перегляду') !== -1) fail('Ashdi не пускає країну цього сервера');
+            else if (ashdiMissing(html)) fail('Ashdi більше не має цього файлу');
             else fail('на сторінці плеєра немає посилання на відео');
         }
         direct(url, {dataType: 'text', headers: {'Referer': HOME}}, function (html) {
@@ -420,11 +787,224 @@
         }, failure);
     }
 
-    // ---- Third source: AnimeOn (animeon.club) through the aggregator behind the "Bandera Online" Lampa plugin -------------
-    // That server lists AnimeOn's titles and voices and turns an episode into an Ashdi stream address. It answers browsers from any
-    // site (CORS), so TVs call it directly. It is someone else's service: if it changes or disappears this source stops working.
+    // UA Serials uses a DLE catalogue and exposes episode HLS playlists in its public HDVB iframe.
+    var UASERIALS = 'https://uaserials.my';
+    function uaserialPage(value, player) {
+        try {
+            var url = new URL(value);
+            return url.protocol === 'https:' && url.hostname === (player ? 'hdvbua.pro' : 'uaserials.my') && !url.port &&
+                (player ? /^\/embed\/\d{1,10}\/[a-f\d]{6,64}$/i.test(url.pathname) : /^\/\d{1,8}-[a-z0-9-]+\.html$/i.test(url.pathname));
+        } catch (e) { return false; }
+    }
+    // Keep a standalone X/Х/Ікс meaningful: the common scorer drops one-letter words.
+    function uaserialHasX(value) {
+        return /(?:^|[^a-zа-яіїєґ0-9])(?:x|х|ікс|икс)(?=$|[^a-zа-яіїєґ0-9])/i.test(String(value || ''));
+    }
+    function uaserialGet(action, value, success, failure) {
+        if (action === 'search' && (!value || value.length > 200)) return failure(null, 'invalid_query');
+        if (action !== 'search' && !uaserialPage(value, action === 'player')) return failure(null, 'invalid_page');
+        function proxy() {
+            var query = action === 'search' ? 'q=' + encodeURIComponent(value) : 'url=' + encodeURIComponent(value);
+            $.ajax({url: homeProxy() + '/uaserials/' + action + '?' + query + (homeKey() ? '&key=' + encodeURIComponent(homeKey()) : ''), dataType: 'text', timeout: 20000, success: success, error: failure});
+        }
+        if (action !== 'player' && window.Lampa && Lampa.Platform && Lampa.Platform.is('android')) {
+            var url = action === 'search' ? UASERIALS + '/index.php?do=search&subaction=search&story=' + encodeURIComponent(value) : value;
+            direct(url, {dataType: 'text'}, success, proxy);
+        } else proxy();
+    }
+    function uaserialCatalog(html) {
+        var doc = page(html), seen = {};
+        return list(doc, '.short-item').map(function (card) {
+            var link = card.querySelector('a[href]');
+            if (!link) return null;
+            var url = absolute(link.getAttribute('href'), UASERIALS);
+            var poster = link.querySelector('img[alt]');
+            var title = (text(card.querySelector('.th-title')) || (poster && poster.getAttribute('alt')) || '').replace(/\s+/g, ' ').trim();
+            var original = text(card.querySelector('.th-title-oname'));
+            if (!uaserialPage(url, false) || !title || seen[url]) return null;
+            seen[url] = true;
+            return {title: title, names: [title, original].filter(Boolean), url: url, note: text(card.querySelector('.short-label')), ref: {url: url}};
+        }).filter(Boolean);
+    }
+    function uaserialMedia(url) {
+        return /^https:\/\/(?:s\d+\.)?hdvbua\.pro\/[^\s]*\.m3u8(?:[?#]|$)/i.test(url || '');
+    }
+    function uaserialPlaylist(html) {
+        var raw = String(html || ''), data;
+        var direct = raw.match(/\bfile\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/i);
+        if (!direct) return null;
+        var movie = jsString(direct[1]);
+        if (uaserialMedia(movie)) return {1: [{label: 'Відео', episodes: [{title: 'Фільм', url: movie}]}]};
+        try { data = JSON.parse(movie); } catch (e) { return null; }
+        if (!Array.isArray(data)) return null;
+        data = data.filter(function (entry) { return entry && typeof entry === 'object'; });
+        function episodes(folder) {
+            return (Array.isArray(folder) ? folder : []).map(function (episode, index) {
+                if (!episode) return null;
+                var url = absolute(episode.file, UASERIALS);
+                return uaserialMedia(url) ? {title: episode.title || 'Серія ' + (index + 1), url: url} : null;
+            }).filter(Boolean);
+        }
+        function voices(folder) {
+            var plain = episodes(folder);
+            if (plain.length) return [{label: 'Відео', episodes: plain}];
+            return (Array.isArray(folder) ? folder : []).map(function (voice) {
+                if (!voice) return null;
+                var list = episodes(voice.folder);
+                return list.length ? {label: voice.title || 'Відео', episodes: list} : null;
+            }).filter(Boolean);
+        }
+        // A film's top-level files are translations, not numbered seasons.
+        var films = data.filter(function (entry) { return uaserialMedia(entry.file); });
+        if (films.length === data.length && films.length) {
+            return {1: films.map(function (entry) {
+                return {label: entry.title || 'Відео', episodes: [{title: 'Фільм', url: entry.file}]};
+            })};
+        }
+        // Only an explicit season label can create a season. Voice folders without it share season 1.
+        var numbered = data.filter(function (entry) { return /сезон|season/i.test(entry.title || '') && seasonNumberIn(entry.title); });
+        if (!numbered.length) {
+            var unnumbered = voices(data);
+            return unnumbered.length ? {1: unnumbered} : {};
+        }
+        var seasons = {};
+        numbered.forEach(function (entry) {
+            var number = seasonNumberIn(entry.title), list = voices(entry.folder);
+            if (list.length) seasons[number] = (seasons[number] || []).concat(list);
+        });
+        return seasons;
+    }
+
+    // AnimeOn uses its own public API. The legacy aggregator below remains only for Makhno's TMDB mapping.
     var ANIMEON_API = 'https://bbe.lme.isroot.in/api/v2';
-    var SOURCE_NAMES = {anitube: 'AniTube', makhno: 'Makhno', animeon: 'AnimeOn', uafix: 'UAflix', dorama: 'DoramaUA', anilibria: 'AniLibria (рос.)'};
+    // ---- UAFilms: a public catalogue (films.aartzz.pp.ua) that names, by the card's TMDB number, the players of one episode ------------
+    // It is used only for that mapping: the Ashdi / zetvideo (UAflix) / Moon page is then read by the same code as everywhere else, and
+    // the video comes straight from the hosting, not through UAFilms. Anonymous clients prove a small piece of work (SHA-256 with N
+    // leading zeros), exactly as the catalogue's own Lampa client does; the token lives 14 minutes.
+    var UAFILMS = 'https://films.aartzz.pp.ua';
+    var SHA_K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+    // SHA-256 of an ASCII string as hex; plain ES5, because crypto.subtle is missing on older TVs and outside https pages.
+    function sha256(text) {
+        var bytes = [], i, j;
+        for (i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i) & 255);
+        var bits = bytes.length * 8;
+        bytes.push(0x80);
+        while (bytes.length % 64 !== 56) bytes.push(0);
+        for (i = 7; i >= 0; i--) bytes.push(i > 3 ? 0 : (bits >>> (i * 8)) & 255);
+        var h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], w = new Array(64);
+        for (i = 0; i < bytes.length; i += 64) {
+            for (j = 0; j < 16; j++) w[j] = (bytes[i + j * 4] << 24) | (bytes[i + j * 4 + 1] << 16) | (bytes[i + j * 4 + 2] << 8) | bytes[i + j * 4 + 3];
+            for (j = 16; j < 64; j++) {
+                var a0 = w[j - 15], a1 = w[j - 2];
+                var s0 = ((a0 >>> 7) | (a0 << 25)) ^ ((a0 >>> 18) | (a0 << 14)) ^ (a0 >>> 3);
+                var s1 = ((a1 >>> 17) | (a1 << 15)) ^ ((a1 >>> 19) | (a1 << 13)) ^ (a1 >>> 10);
+                w[j] = (w[j - 16] + s0 + w[j - 7] + s1) | 0;
+            }
+            var a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], k = h[7];
+            for (j = 0; j < 64; j++) {
+                var t1 = (k + (((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))) + ((e & f) ^ (~e & g)) + SHA_K[j] + w[j]) | 0;
+                var t2 = ((((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+                k = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+            }
+            h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0;
+            h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + k) | 0;
+        }
+        return h.map(function (v) { return ('00000000' + (v >>> 0).toString(16)).slice(-8); }).join('');
+    }
+    var uafilmsPow = null, uafilmsPowWaiting = null, uafilmsCache = {}, uafilmsPause = {until: 0, why: ''};
+    function uafilmsToken(success, failure) {
+        var now = Date.now();
+        if (!uafilmsPow) { try { uafilmsPow = Lampa.Storage.get('anitube_uafilms_pow', '') || null; } catch (e) {} }
+        if (uafilmsPow && uafilmsPow.token && uafilmsPow.exp > now + 30000) return success(uafilmsPow.token);
+        if (uafilmsPowWaiting) return uafilmsPowWaiting.push([success, failure]);
+        uafilmsPowWaiting = [[success, failure]];
+        function done(token, why) {
+            var waiting = uafilmsPowWaiting; uafilmsPowWaiting = null;
+            if (token) {
+                uafilmsPow = {token: token, exp: Date.now() + 840000};
+                try { Lampa.Storage.set('anitube_uafilms_pow', uafilmsPow); } catch (e) {}
+            }
+            waiting.forEach(function (pair) { if (token) pair[0](token); else pair[1](why); });
+        }
+        $.ajax({url: UAFILMS + '/api/challenge', dataType: 'json', timeout: 15000, cache: false, success: function (task) {
+            if (!task || !task.salt || !(task.difficulty >= 1 && task.difficulty <= 6)) return done('', 'UAFilms не дав завдання перевірки');
+            var zeros = new Array(task.difficulty + 1).join('0'), nonce = 0, started = Date.now();
+            (function step() {
+                // Chunks keep the remote and the screen responsive while the TV counts.
+                for (var stop = nonce + 3000; nonce < stop; nonce++) {
+                    if (sha256(task.salt + ':' + nonce).indexOf(zeros) === 0) {
+                        var answer = {salt: task.salt, nonce: nonce, timestamp: task.timestamp, signature: task.signature};
+                        return $.ajax({url: UAFILMS + '/api/challenge/verify', type: 'POST', contentType: 'application/json', data: JSON.stringify(answer),
+                            dataType: 'json', timeout: 15000, success: function (reply) {
+                                done(reply && reply.success && reply.token ? reply.token : btoa(JSON.stringify(answer)));
+                            }, error: function () { done(btoa(JSON.stringify(answer))); }});
+                    }
+                }
+                if (Date.now() - started > 60000) return done('', 'перевірка UAFilms триває задовго');
+                setTimeout(step, 0);
+            })();
+        }, error: function (xhr) { done('', 'UAFilms не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '')); }});
+    }
+    // Players of one episode (or of a film when season is 0). The answer is kept ten minutes.
+    function uafilmsSources(tmdb, season, episode, success, failure, retried) {
+        var path = season ? '/v1/tv/' + encodeURIComponent(tmdb) + '/seasons/' + season + '/episodes/' + episode : '/v1/movies/' + encodeURIComponent(tmdb);
+        var cached = uafilmsCache[path];
+        if (cached && cached.at > Date.now() - 600000) return success(cached.list);
+        // After "too many requests" the catalogue bans the address for half an hour on repeat, so it is left alone meanwhile.
+        if (uafilmsPause.until > Date.now()) return failure(uafilmsPause.why);
+        uafilmsToken(function (token) {
+            $.ajax({url: UAFILMS + path + '?platform=tv&pow_token=' + encodeURIComponent(token), dataType: 'json', timeout: 30000, cache: false,
+                success: function (data) {
+                    var list = uafilmsVariants(data);
+                    uafilmsCache[path] = {at: Date.now(), list: list};
+                    success(list);
+                }, error: function (xhr) {
+                    var answer = {};
+                    try { answer = JSON.parse(xhr.responseText).error || {}; } catch (e) {}
+                    if (answer.code === 'IP_TEMPORARILY_BANNED' || (xhr && xhr.status === 429)) {
+                        var minutes = parseInt((String(answer.message || '').match(/(\d+)\s*хв/) || [])[1], 10) || 1;
+                        uafilmsPause = {until: Date.now() + minutes * 60000, why: answer.code === 'IP_TEMPORARILY_BANNED'
+                            ? 'UAFilms тимчасово заблокував цю адресу за часті запити, ще приблизно ' + minutes + ' хв'
+                            : 'UAFilms просить зачекати хвилину між запитами, спробуй ще раз трохи згодом'};
+                        return failure(uafilmsPause.why);
+                    }
+                    if (!retried && xhr && (xhr.status === 401 || xhr.status === 403)) {
+                        uafilmsPow = null;
+                        try { Lampa.Storage.set('anitube_uafilms_pow', ''); } catch (e) {}
+                        return uafilmsSources(tmdb, season, episode, success, failure, true);
+                    }
+                    failure('UAFilms не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : ''));
+                }});
+        }, failure);
+    }
+    // Only players this plugin reads itself: Ashdi and zetvideo by number, Moon by its page. Tortuga/Fenix would mean playing
+    // through the catalogue's own relay, so they are left out.
+    function uafilmsVariants(data) {
+        var seen = {};
+        return ((data && data.sources) || []).map(function (s) {
+            var provider = String((s.provider && s.provider.id) || ''), query = String(s.url || '').split('?')[1] || '', params = {}, page = '';
+            query.split('&').forEach(function (pair) { var at = pair.indexOf('='); if (at > 0) params[pair.slice(0, at)] = decodeURIComponent(pair.slice(at + 1)); });
+            if (provider === 'ashdi' && /^\d{1,10}$/.test(params.id || '')) page = 'https://ashdi.vip/vod/' + params.id;
+            else if (provider === 'zetvideo' && /^\d{1,10}$/.test(params.id || '')) page = 'https://zetvideo.net/vod/' + params.id;
+            else if (provider === 'moonanime' && moonPage(params.url || '')) page = params.url;
+            if (!page) return null;
+            var player = provider === 'zetvideo' ? 'UAflix' : provider === 'moonanime' ? 'Moon' : 'Ashdi';
+            var studio = String((s.studio && s.studio.name) || '').replace(/\s+/g, ' ').trim();
+            var generic = !studio || studio === 'Ashdi' || studio === 'ZetVideo' || studio === 'Плеєр';
+            if (generic) studio = s.lang === 'en' ? 'Субтитри' : 'Озвучення';
+            var label = generic && player === 'UAflix' ? 'UAflix' : studio + ' · ' + player, key = provider + '|' + studio;
+            if (seen[key]) return null;
+            seen[key] = true;
+            return {key: key, label: label, player: player, page: page, subs: studio === 'Субтитри'};
+        }).filter(Boolean).sort(function (a, b) { return a.subs - b.subs; }); // the Ukrainian voices first, the subtitled original after them
+    }
+
+    var SOURCE_NAMES = {anitube: 'AniTube', makhno: 'Makhno', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', dorama: 'DoramaUA', uaserials: 'UA Serials', anilibria: 'AniLibria (рос.)'};
     function animeonCall(path, query, body, success, failure) {
         var url = ANIMEON_API + path;
         var settings = {url: url, dataType: 'json', timeout: 30000, cache: false, success: success, error: failure};
@@ -437,42 +1017,87 @@
         }
         $.ajax(settings);
     }
-    function animeonCatalog(data) {
-        var seen = {};
-        return ((data && data.items) || []).map(function (item) {
-            var ref = item && item.ref;
-            if (!item || item.source !== 'animeon' || !ref || !/^\d{1,10}$/.test(String(ref.id))) return null;
-            var url = 'animeon:' + ref.id + ':' + (ref.season || 1);
-            if (seen[url]) return null;
-            seen[url] = true;
-            var title = String(item.title || '').replace(/\s+/g, ' ').trim();
-            if (!title) return null;
-            var year = String(item.year || '');
-            return {title: title, names: [title, item.title_en], url: url, note: [year, item.title_en].filter(Boolean).join(' · '), year: year, ref: {id: ref.id, season: ref.season || 1}};
-        }).filter(Boolean);
+    // Read the site's public API directly on Android, through the owner's Worker on TVs.
+    function animeonApi(action, params, success, failure) {
+        var paths = {search: '/anime?search=' + encodeURIComponent(params.q || ''),
+            translations: '/player/' + params.id + '/translations',
+            episodes: '/player/' + params.id + '/episodes?take=100&skip=' + (params.skip || 0) + '&playerId=' + params.player + '&translationId=' + params.translation};
+        function read(value) {
+            try { value = typeof value === 'string' ? JSON.parse(value) : value; } catch (e) { return failure(null, 'invalid_json'); }
+            success(value);
+        }
+        direct('https://animeon.club/api' + paths[action], {dataType: 'text', headers: {'Referer': '', 'Accept': 'application/json'}}, read, function () {
+            var query = Object.keys(params).map(function (key) { return key + '=' + encodeURIComponent(params[key]); }).join('&');
+            $.ajax({url: homeProxy() + '/animeon/' + action + '?' + query + '&key=' + encodeURIComponent(homeKey()), dataType: 'text', timeout: 20000, success: read,
+                error: function (xhr) { failure(xhr, xhr && xhr.status === 404 ? 'онови Worker у Cloudflare для прямого AnimeOn' : 'AnimeOn не відповів'); }});
+        });
     }
-    // Only voices that come as an Ashdi player are kept, the one player this plugin can play. "[Ashdi] Рідний Голос" becomes "Рідний Голос".
-    function animeonVoices(data, season) {
-        return ((data && data.voices) || []).map(function (voice) {
-            var name = String(voice.display_name || voice.id || '');
-            if (!/^\[Ashdi\]/i.test(name)) return null;
-            var seasons = voice.seasons || [];
-            var chosen = seasons.filter(function (entry) { return Number(entry.title) === Number(season); })[0] || seasons[0];
-            var episodes = ((chosen && chosen.episodes) || []).filter(function (e) { return e && e.number && e.ref && e.ref.episode_id; }).map(function (e) {
-                return {title: 'Серія ' + e.number, url: 'animeon:' + e.ref.episode_id, ref: e.ref, subtitles: true};
+    function animeonCatalog(data) {
+        return ((data && (data.results || data.result)) || []).filter(function (item) { return item && /^\d{1,10}$/.test(String(item.id)); }).map(function (item) {
+            var title = String(item.titleUa || item.title || '').trim();
+            return {title: title, names: [title, item.titleEn], url: 'animeon:' + item.id + ':1', year: String(item.year || (item.releaseDate || '').slice(0, 4)),
+                note: item.titleEn || '', ref: {id: item.id, season: 1}};
+        }).filter(function (item) { return !!item.title; });
+    }
+    function animeonLoadVoices(id, success, failure) {
+        animeonApi('translations', {id: id}, function (data) {
+            var jobs = [];
+            (data.translations || []).forEach(function (item) {
+                if (!item.translation) return;
+                (item.player || []).filter(function (player) { return /ashdi/i.test(player.name); }).forEach(function (player) {
+                    jobs.push({label: String(item.translation.name || 'Українська озвучка').replace(/\s*\|\s*/g, ' · ').trim(), player: 'Ashdi', episodes: [], translation: item.translation.id, playerId: player.id});
+                });
             });
-            return episodes.length ? {label: name.replace(/^\[Ashdi\]\s*/i, '').replace(/\s*\|\s*/g, ' · ').trim(), episodes: episodes} : null;
-        }).filter(Boolean);
+            if (!jobs.length) return success([]);
+            var pending = jobs.length, failed = false;
+            function fail(xhr, why) { if (!failed) { failed = true; failure(xhr, why); } }
+            jobs.forEach(function (job) {
+                function page(skip) {
+                    animeonApi('episodes', {id: id, player: job.playerId, translation: job.translation, skip: skip}, function (data) {
+                        if (failed) return;
+                        var episodes = data.episodes || [], before = job.episodes.length;
+                        episodes.forEach(function (episode) {
+                            if (!/^\d{1,10}$/.test(String(episode.id)) || !Number.isFinite(Number(episode.episode))) return;
+                            if (job.episodes.some(function (entry) { return entry.ref.episode_id === episode.id; })) return;
+                            job.episodes.push({title: Number(episode.episode) === 0 ? 'Спецвипуск 0' : 'Серія ' + episode.episode,
+                                url: 'animeon:' + episode.id, ref: {episode_id: episode.id}, subtitles: true});
+                        });
+                        if (data.pagination && data.pagination.hasMore && episodes.length) {
+                            if (before === job.episodes.length) return fail(null, 'AnimeOn повторив сторінку серій');
+                            if (skip >= 20000) return fail(null, 'завеликий список серій');
+                            return page(skip + episodes.length);
+                        }
+                        if (--pending === 0) success(jobs.filter(function (voice) { return voice.episodes.length; }));
+                    }, fail);
+                }
+                page(0);
+            });
+        }, failure);
+    }
+    // AnimeOn's own API names the episode's Ashdi page. It has no CORS, so a TV asks through the owner's Worker.
+    function animeonPlayerPage(id, success, failure) {
+        function read(text) {
+            var page = '';
+            try {
+                var address = new URL(JSON.parse(text).videoUrl);
+                page = address.origin + address.pathname;
+            } catch (e) {}
+            if (ashdiPage(page)) success(page);
+            else failure('AnimeOn не дав адресу плеєра');
+        }
+        function proxy() {
+            var home = homeProxy();
+            if (!home) return failure('домашній проксі не налаштовано');
+            $.ajax({url: homeUrl(home, 'animeon', 'id', id), dataType: 'text', timeout: 20000, cache: false, success: read, error: function (xhr) {
+                failure(xhr && xhr.status === 404 ? 'потрібно оновити Worker у Cloudflare' : 'AnimeOn не відповів');
+            }});
+        }
+        direct('https://animeon.club/api/player/' + id + '/episode', {dataType: 'text'}, read, proxy);
     }
     function animeonStream(ref, wantSubtitles, success, failure) {
-        animeonCall('/stream', null, {source: 'animeon', ref: ref}, function (data) {
-            var stream = data && data.ok && data.streams && data.streams[0] && absolute(data.streams[0].url, 'https://ashdi.vip/');
-            if (!(stream && new URL(stream).hostname === 'ashdi.vip' && media(stream))) return failure((data && data.error) || 'немає потоку');
-            var id = (stream.match(/_(\d{4,10})\/hls\//) || [])[1];
-            if (!wantSubtitles || !id) return success(stream, []);
-            // A missing subtitle file must never block the episode.
-            ashdiStream('https://ashdi.vip/vod/' + id, function (ignored, subtitles) { success(stream, subtitles || []); }, function () { success(stream, []); });
-        }, function (xhr) { failure(xhr && xhr.status ? 'AnimeOn: HTTP ' + xhr.status : 'AnimeOn: сервер не відповідає'); });
+        animeonPlayerPage(ref.episode_id, function (page) {
+            ashdiStream(page, function (stream, subtitles) { success(stream, wantSubtitles ? subtitles || [] : []); }, failure);
+        }, failure);
     }
 
     // ---- Fourth source: Makhno = Ashdi's own catalogue, found by the card's TMDB number ----------------------------------
@@ -715,13 +1340,15 @@
             var url = e && (e.hls_1080 || e.hls_720 || e.hls_480);
             var ok = false;
             try { ok = !!url && media(String(url)) && /(^|\.)(libria\.fun|anilibria\.(top|tv))$/.test(new URL(url).hostname); } catch (x) {}
-            return ok ? {title: 'Серія ' + e.ordinal, url: String(url)} : null;
+            return ok ? {title: 'Серія ' + e.ordinal, url: String(url), quality: e.hls_1080 === url ? 1080 : e.hls_720 === url ? 720 : 480} : null;
         }).filter(Boolean);
         return episodes.length ? [{label: 'Російська озвучка', episodes: episodes}] : [];
     }
 
     // A green round play icon drawn as SVG: the earlier green-circle emoji shows as an empty box on TVs whose font has no emoji.
     var ICON = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" fill="#2ecc71"></circle><path d="M9.6 7.6v8.8l7.2-4.4z" fill="#ffffff"></path></svg>';
+    var CHEVRON = '<svg class="atp-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="m3 6 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2"></path></svg>';
+    var CHECK = '<svg class="atp-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="m2 8 4 4 8-8" fill="none" stroke="currentColor" stroke-width="2"></path></svg>';
     // Sources with a Russian voice-over are hidden until Settings -> AniTube -> "Показувати російські джерела" is switched on.
     var RUSSIAN_SOURCES = {anilibria: true};
     function russianEnabled() {
@@ -848,15 +1475,45 @@
         var low = String(value || '').toLowerCase();
         return low.charAt(0).toUpperCase() + low.slice(1);
     }
+    // A team's default player: Moon when it has at least Ashdi's episodes, then Ashdi, then the first that works.
+    function preferredVoice(voices, label) {
+        var team = voices.filter(function (v) { return v.label === label && v.supported !== false; });
+        var ashdi = team.filter(function (v) { return v.player === 'Ashdi'; })[0];
+        var moon = team.filter(function (v) { return v.player === 'Moon'; })[0];
+        var best = moon && (!ashdi || moon.episodes.length >= ashdi.episodes.length) ? moon : ashdi || team[0];
+        return voices.indexOf(best);
+    }
     // "ОЗВУЧЕННЯ" + "QTV" -> "Озвучення · QTV"
     function voiceLabel(source) { return sentence(source.mode) + (source.variant ? ' · ' + source.variant : ''); }
-    // Episode title as AniTube lists it: "12 серія" becomes "Серія 12"; "OVA 1", "Фільм" and the like stay as they are.
+    // Preserve meaningful source titles; replace a generic film label with the selected title for display only.
     // The number is also used as the watch-progress key, so it is read from the title only (stream file names do not match AniTube's numbering).
-    function episodeInfo(raw) {
+    function episodeInfo(raw, filmTitle) {
         var title = String(raw || '').replace(/\s+/g, ' ').trim();
         var plain = title.match(/^(?:серія\s*)?(\d+)\s*(?:серія|серії|серій|епізод|ep\.?|episode)?$/i);
         var number = plain ? parseInt(plain[1], 10) : 0;
-        return {number: number, label: plain ? 'Серія ' + number : title, original: title};
+        var label = plain ? 'Серія ' + number : title;
+        if (filmTitle && /^(?:фільм|фильм|film|movie|відео)?$/i.test(label)) label = filmTitle;
+        return {number: number, label: label, original: title};
+    }
+    function cleanPlayer(on) {
+        var body = $('body')[0];
+        if (body && body.classList) body.classList.toggle('anitube-player', !!on);
+    }
+    function playbackVersion(work, owner) {
+        if (!work || work.anitube_owner !== owner) return;
+        if (work.anitube_version_shown) { delete work.anitube_version_shown; return; }
+        Lampa.Noty.show('AniTube v' + VERSION + (work.title ? ' · ' + work.title : ''));
+    }
+
+    // Indices only: the caller's entries and progress objects are never reordered in place.
+    // Numbered episodes sort numerically; specials with no number remain after them in source order.
+    function episodeOrder(entries, descending) {
+        return entries.map(function (entry, index) { return index; }).sort(function (a, b) {
+            var x = entries[a].info.number, y = entries[b].info.number;
+            if (x && y) return (descending ? y - x : x - y) || a - b;
+            if (x || y) return x ? -1 : 1;
+            return a - b;
+        });
     }
 
     // ---- Episode screen --------------------------------------------------------------------------------------------
@@ -871,8 +1528,16 @@
         var html, scroll, body, rows = [], cur = {r: 0, c: 0};
         var results = [], item = null, voices = [], voiceIndex = 0, entries = [], closed = false, manual = '', tmdbCache = {}, token = 0;
         var isTv = !!(movie.name || movie.number_of_seasons || movie.first_air_date);
+        var descending = Lampa.Storage.get('anitube_episode_order', 'asc') === 'desc';
 
         function saved(key) { var all = Lampa.Storage.get('anitube_choice', '{}'); return (all && all[key]) || {}; }
+        // The player the owner picked by hand wins; otherwise the team's default. This is the variant a voice opens.
+        function voiceFor(label) {
+            var player = saved(key).player;
+            var picked = !player ? -1 : voices.findIndex(function (v) { return v.label === label && v.player === player && v.supported !== false; });
+            if (picked < 0) picked = preferredVoice(voices, label);
+            return picked < 0 ? voices.findIndex(function (v) { return v.label === label; }) : picked;
+        }
         function remember(key, value) {
             var all = Lampa.Storage.get('anitube_choice', '{}');
             if (!all || typeof all !== 'object') all = {};
@@ -882,8 +1547,18 @@
         var key = String(movie.id || movie.original_title || movie.title || '');
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
-        var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
+        var ORDER = ['anitube', 'makhno', 'uafilms', 'animeon', 'uafix', 'dorama', 'uaserials', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var playSeq = 0, launching = false;
+        var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
+        var playbackOwner = 'anitube-' + Date.now() + '-' + Math.random();
         var seasons = {}, season = 0;
+        function playbackStatus(code, message) {
+            if (closed) return;
+            playbackMessage = (code ? code + ' · ' : '') + message;
+            if (body) body.find('.atp-playback-status').text(playbackMessage);
+            if (code) Lampa.Noty.show(playbackMessage, {time: 12000});
+        }
         function active() { return Lampa.Activity.active() && Lampa.Activity.active().activity === self.activity; }
 
         function focusAt(r, c) {
@@ -892,15 +1567,17 @@
             c = Math.max(0, Math.min(rows[r].length - 1, c));
             cur.r = r; cur.c = c;
             var el = rows[r][c];
+            if (el && el.atEntry && source !== 'uafilms') self.inspectQuality(el.atEntry, el.atQuality, token);
             // The set of focusable elements is remembered once by Lampa, and the list is redrawn, so read it again before focusing.
             Lampa.Controller.collectionSet(scroll.render());
             Lampa.Controller.collectionFocus(el, scroll.render());
             try { scroll.update($(el), true); } catch (e) {}
         }
-        function chip(label, value, on, enter) {
+        function chip(label, value, on, enter, dropdown) {
             var node = $('<div class="atp-chip selector' + (on ? ' atp-chip--on' : '') + '"><span class="atp-chip__l"></span><span class="atp-chip__v"></span></div>');
             node.find('.atp-chip__l').text(label);
             node.find('.atp-chip__v').text(value || '');
+            if (dropdown) node.find('.atp-chip__v').append(CHEVRON);
             node.on('hover:enter', enter);
             return node;
         }
@@ -936,7 +1613,7 @@
         // AniTube keeps every season on its own page, so TMDB's season is only matched by the number in the title (or "1" for the first one).
         function tmdbSeason() {
             if (!isTv || !movie.id || !item) return 0;
-            if (source === 'uafix' || source === 'makhno' || source === 'dorama') return season;
+            if (source === 'uafix' || source === 'makhno' || source === 'uafilms' || source === 'dorama' || source === 'uaserials') return season;
             if (source === 'animeon') return seasonOf(item) || (item.ref && item.ref.season) || 0;
             return seasonOf(item) || (results.length <= 1 || results.indexOf(item) === 0 ? 1 : 0);
         }
@@ -971,6 +1648,27 @@
             body = $('<div class="atp__body"></div>');
             scroll.append(body);
             html.append(scroll.render());
+            if (Lampa.Player.listener && Lampa.Player.listener.follow) {
+                playbackListener = function (work) {
+                    playbackVersion(work, playbackOwner);
+                    cleanPlayer(work && work.anitube_owner === playbackOwner);
+                    if (!work || work.anitube_owner !== playbackOwner) restoreNativePlayback(playbackOwner);
+                    if (moonWatchStop) { moonWatchStop(); moonWatchStop = null; }
+                    if (moonQualityStop) { moonQualityStop(); moonQualityStop = null; }
+                    if (work && work.anitube_owner === playbackOwner) {
+                        moonWatchStop = watchMoonPlayback(work, playbackStatus, function () {
+                            if (closed || !tvPlatform()) return;
+                            var index = entries.findIndex(function (entry) { return entry.url === work.anitube_source_url; });
+                            var next = entries[index + 1];
+                            if (index >= 0 && next) self.resolve(next, function () {}, function () {});
+                        });
+                        if (work.anitube_moon && tvPlatform()) moonQualityStop = watchMoonQuality();
+                    }
+                };
+                Lampa.Player.listener.follow('start', playbackListener);
+                playerCloseListener = function () { launching = false; restoreNativePlayback(playbackOwner); cleanPlayer(false); };
+                Lampa.Player.listener.follow('destroy', playerCloseListener);
+            }
             this.activity.loader(true);
             manual = saved(key).query || '';
             // Other names of the card from two places at once (TMDB translations, AniList for a Japanese-only card), then the search starts.
@@ -1008,37 +1706,58 @@
             if (item && item.ref && item.ref.id) meta.push('№ ' + item.ref.id);
             head.find('.atp__meta').text(meta.join(' · '));
             body.append(head);
+            body.append($('<div class="atp-playback-status"></div>').text(playbackMessage));
 
             var first = [];
             // Releases of the same show are its seasons; everything else that was found is another candidate, kept out of the chip rows.
-            var related = item ? results.filter(function (r) { return r === item || sameFranchise(r, item); }) : [];
+            var related = item ? results.filter(function (r) { return r === item || (isTv && sameFranchise(r, item)); }) : [];
             var others = item ? results.filter(function (r) { return related.indexOf(r) < 0; }) : [];
             if (voice) {
-                first.push(chip('Озвучення', voice.label + (voices.length > 1 ? ' ▾' : ''), false, function () {
+                first.push(chip('Озвучення', voice.label, false, function () {
                     if (voices.length < 2) return Lampa.Noty.show('Для цього тайтлу лише один варіант озвучення');
                     Lampa.Select.show({
                         title: 'Озвучення / субтитри',
-                        items: voices.map(function (v, index) { return {title: v.label, subtitle: 'Серій: ' + v.episodes.length, selected: index === voiceIndex, index: index}; }),
+                        items: voices.filter(function (v, index) { return voices.findIndex(function (x) { return x.label === v.label; }) === index; }).map(function (v) {
+                            var opens = voiceFor(v.label);
+                            return {title: v.label, subtitle: 'Серій: ' + voices[opens].episodes.length, selected: v.label === voice.label, index: opens};
+                        }),
                         onBack: function () { Lampa.Controller.toggle('content'); },
                         onSelect: function (picked) {
+                            playbackMessage = '';
                             voiceIndex = picked.index;
-                            remember(key, {voice: voices[voiceIndex].label});
+                            remember(key, {voice: voices[voiceIndex].label, player: saved(key).player || ''});
                             Lampa.Controller.toggle('content');
                             self.draw();
                             focusAt(0, 0);
                         }
                     });
-                }));
+                }, voices.length > 1));
             }
-            first.push(chip('Джерело', SOURCE_NAMES[source] + ' ▾', false, function () {
+            if (voice && voice.player) {
+                first.push(chip('Плеєр', voice.player, false, function () {
+                    Lampa.Select.show({title: 'Плеєр · ' + voice.label,
+                        items: voices.map(function (v, index) { return {title: v.player, subtitle: (v.supported === false ? 'Не підтримується · ' : '') + 'Серій: ' + v.episodes.length, selected: index === voiceIndex, index: index, label: v.label}; }).filter(function (v) { return v.label === voice.label; }),
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (picked) {
+                            playbackMessage = '';
+                            voiceIndex = picked.index;
+                            remember(key, {voice: voices[voiceIndex].label, player: voices[voiceIndex].player});
+                            Lampa.Controller.toggle('content'); self.draw(); focusAt(0, 1);
+                        }
+                    });
+                }, true));
+            }
+            first.push(chip('Джерело', SOURCE_NAMES[source], false, function () {
                 Lampa.Select.show({
                     title: 'Джерело серій',
                     items: ([
                         {title: 'AniTube', subtitle: 'Аніме (укр)', selected: source === 'anitube', value: 'anitube'},
                         {title: 'Makhno', subtitle: 'Аніме, Фільми, Серіали (укр)', selected: source === 'makhno', value: 'makhno'},
+                        {title: 'UAFilms', subtitle: 'Ashdi, UAflix, Moon за номером TMDB (укр)', selected: source === 'uafilms', value: 'uafilms'},
                         {title: 'AnimeOn', subtitle: 'Аніме (укр)', selected: source === 'animeon', value: 'animeon'},
                         {title: 'UAflix', subtitle: 'Аніме, Фільми, Серіали, Дорами (укр)', selected: source === 'uafix', value: 'uafix'},
                         {title: 'DoramaUA', subtitle: 'Дорами (укр)', selected: source === 'dorama', value: 'dorama', box: true},
+                        {title: 'UA Serials', subtitle: 'Фільми, Серіали, Дорами, Аніме (укр)', selected: source === 'uaserials', value: 'uaserials'},
                         {title: 'AniLibria', subtitle: 'Аніме (рос)', selected: source === 'anilibria', value: 'anilibria', ru: true}
                     ]).filter(function (entry) { return (!entry.ru || russianEnabled()) && (!entry.box || sourceAllowed('dorama')); }),
                     onBack: function () { Lampa.Controller.toggle('content'); },
@@ -1047,9 +1766,9 @@
                         if (picked.value !== source) self.switchSource(picked.value);
                     }
                 });
-            }));
+            }, true));
             if (others.length) {
-                first.push(chip('Інші варіанти', others.length + ' ▾', false, function () {
+                first.push(chip('Інші варіанти', others.length, false, function () {
                     Lampa.Select.show({
                         title: 'Інші знайдені варіанти',
                         items: others.map(function (r, index) { return {title: r.title, subtitle: r.note || '', index: index}; }),
@@ -1059,19 +1778,34 @@
                             self.openTitle(others[picked.index]);
                         }
                     });
-                }));
+                }, true));
+            }
+            if (voice && voice.episodes.length > 1) {
+                var orderColumn = first.length;
+                var orderButton = chip('', '', descending, function () {
+                    descending = !descending;
+                    Lampa.Storage.set('anitube_episode_order', descending ? 'desc' : 'asc');
+                    self.focusEpisode = false;
+                    self.draw();
+                    focusAt(0, orderColumn);
+                });
+                orderButton.attr('class', 'atp-chip atp-chip--sort selector' + (descending ? ' atp-chip--on' : ''));
+                orderButton.attr('title', descending ? 'Від останньої серії' : 'Від першої серії');
+                orderButton.attr('aria-label', descending ? 'Серії від останньої. Перемкнути порядок' : 'Серії від першої. Перемкнути порядок');
+                orderButton.find('.atp-chip__l').append('<svg viewBox="0 0 36 24" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M10 20V4m-5 5 5-5 5 5" fill="none" stroke="currentColor" stroke-width="2.5" opacity="' + (descending ? '1' : '.3') + '"></path><path d="M26 4v16m-5-5 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2.5" opacity="' + (descending ? '.3' : '1') + '"></path></svg>');
+                first.push(orderButton);
             }
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
-            if (source === 'uafix' || source === 'makhno' || source === 'dorama') {
+            if (source === 'uafix' || source === 'makhno' || source === 'uafilms' || source === 'dorama' || source === 'uaserials') {
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (numbers.length > 1) {
                     addRow(numbers.map(function (number) {
                         return chip('Сезон ' + number, '', number === season, function () {
                             if (number === season) return;
                             remember(key, {season: number});
-                            if (source === 'makhno' || source === 'dorama') self.useMakhnoSeason(number); else self.useSeason(number);
+                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'makhno' || source === 'dorama' || source === 'uaserials') self.useMakhnoSeason(number); else self.useSeason(number);
                         });
                     }));
                 }
@@ -1106,11 +1840,14 @@
         };
 
         this.episodes = function (current, voice) {
+            if (!voice) return;
             entries = voice.episodes.map(function (episode) {
-                var info = episodeInfo(episode.title);
-                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'makhno' || source === 'dorama' ? '#s' + season : '') + ':' + (info.number || info.original));
-                return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, info: info, title: info.label + ' · ' + item.title, timeline: Lampa.Timeline.view(hash)};
+                var info = episodeInfo(episode.title, item.title);
+                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'makhno' || source === 'uafilms' || source === 'dorama' || source === 'uaserials' ? '#s' + season : '') + ':' + (info.number || info.original));
+                return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label, timeline: Lampa.Timeline.view(hash)};
             });
+            entries = episodeOrder(entries, false).map(function (index) { return entries[index]; });
+            var displayOrder = episodeOrder(entries, descending);
             var lastWatched = -1;
             entries.forEach(function (entry, index) { if (entry.timeline.percent > 0) lastWatched = index; });
             var target = lastWatched < 0 ? 0 : (entries[lastWatched].timeline.percent >= 90 ? Math.min(lastWatched + 1, entries.length - 1) : lastWatched);
@@ -1122,13 +1859,16 @@
                 if (closed || current !== token) return;
                 // The stills and descriptions are only used when TMDB's season is about as long as AniTube's list, so they cannot belong to another season.
                 // A show picked from the list that does not share a name with the card (another drama on an anime's card) gets no stills.
-                var count = tm.__count || 0, fits = count && item.matched !== false && Math.abs(count - entries.length) <= Math.max(2, Math.round(count * 0.2));
+                var count = tm.__count || 0, numbers = entries.map(function (e) { return e.info.number; });
+                var partial = item.matched === true && numbers.length > 0 && numbers.every(function (n, i) { return n === i + 1 && !!tm[n]; });
+                var fits = count && item.matched !== false && (Math.abs(count - entries.length) <= Math.max(2, Math.round(count * 0.2)) || partial);
                 list.empty();
-                entries.forEach(function (entry, index) {
+                displayOrder.forEach(function (index, displayIndex) {
+                    var entry = entries[index];
                     var t = (fits && entry.info.number && tm[entry.info.number]) || {};
                     var percent = Math.min(100, entry.timeline.percent || 0);
-                    var date = t.air_date || '', runtime = t.runtime ? t.runtime + ' хв' : '';
-                    var node = $('<div class="atp-ep selector"><div class="atp-ep__img"><div class="atp-ep__num"></div></div><div class="atp-ep__body"><div class="atp-ep__name"></div><div class="atp-ep__meta"></div><div class="atp-ep__descr"></div></div></div>');
+                    var date = episodeDate(t.air_date), runtime = t.runtime ? t.runtime + ' хв' : '';
+                    var node = $('<div class="atp-ep selector"><div class="atp-ep__img"><div class="atp-ep__num"></div></div><div class="atp-ep__body"><div class="atp-ep__name"></div><div class="atp-ep__meta"></div><div class="atp-ep__date"></div><div class="atp-ep__descr"></div></div></div>');
                     var picture = t.still_path || movie.backdrop_path;
                     if (picture) {
                         var img = $('<img loading="lazy">');
@@ -1137,20 +1877,98 @@
                     }
                     node.find('.atp-ep__num').text(entry.info.number || '');
                     if (percent > 0 && percent < 90) node.find('.atp-ep__img').append('<div class="atp-ep__bar"><i style="width:' + percent + '%"></i></div>');
-                    var own = t.name && !/^\s*(серія|епізод|episode)\s*\d+\s*$/i.test(t.name);
-                    node.find('.atp-ep__name').text(own ? entry.info.label + ' · ' + t.name : entry.info.label);
-                    node.find('.atp-ep__meta').text([voice.label, date, runtime].filter(Boolean).join(' · '));
+                    var own = t.name && normalize(t.name) !== normalize(item.title) && !/^\s*(серія|епізод|episode)\s*\d+\s*$/i.test(t.name);
+                    var name = own ? entry.info.label + ' · ' + t.name : entry.info.label;
+                    entry.title = name;
+                    function showQuality(height) { node.find('.atp-ep__name').text(name + (height ? ' · ' + height + 'p' : '')); }
+                    showQuality(entry.quality);
+                    node.find('.atp-ep__meta').text([voice.label, voice.player, voice.supported === false ? 'Плеєр не підтримується' : ''].filter(Boolean).join(' · '));
+                    node.find('.atp-ep__date').text([date, runtime].filter(Boolean).join(' · '));
+                    node[0].atEntry = entry; node[0].atQuality = showQuality;
+                    if (displayIndex < 8 && media(entry.url)) self.inspectQuality(entry, showQuality, current);
                     node.find('.atp-ep__descr').text(t.overview || '');
-                    if (percent >= 90) node.append($('<div class="atp-ep__st atp-ep__st--ok"></div>').text('✓ Переглянуто'));
+                    if (percent >= 90) node.append($('<div class="atp-ep__st atp-ep__st--ok"></div>').append(CHECK).append('<span>Переглянуто</span>'));
                     else if (index === target && percent > 0) node.append($('<div class="atp-ep__st atp-ep__st--go"></div>').text('Продовжити'));
                     node.on('hover:enter', function () { self.play(index); });
                     list.append(node);
                     rows.push([node[0]]);
                 });
                 try { Lampa.Layer.update(); } catch (e) {}
-                if (self.focusEpisode) { self.focusEpisode = false; focusAt(firstRow + target, 0); }
+                if (self.focusEpisode) { self.focusEpisode = false; focusAt(firstRow + (descending ? 0 : Math.max(0, displayOrder.indexOf(target))), 0); }
             });
         };
+
+        this.inspectQuality = function (entry, update, current) {
+            if (!entry || entry.supported === false || entry.quality || entry.qualityQueued) return;
+            var cached = qualityCache[entry.url];
+            if (cached) { entry.quality = cached.height; if (update) update(entry.quality); return; }
+            entry.qualityQueued = true;
+            qualityQueue.push({entry: entry, update: update, current: current});
+            pumpQuality();
+        };
+        // Share a manifest read between the card badge, playback and preloaded playlist entries.
+        function inspectStream(entry, url, done) {
+            function apply(info) {
+                entry.streamInfo = info; entry.streamInfoUrl = url;
+                if (info.height) entry.quality = info.height;
+                done(info);
+            }
+            if (streamMetadata[url]) return apply(streamMetadata[url]);
+            if (streamWaiting[url]) { streamWaiting[url].push(apply); return; }
+            streamWaiting[url] = [apply];
+            streamInfo(url, function (info) {
+                streamMetadata[url] = info;
+                var waiting = streamWaiting[url];
+                delete streamWaiting[url];
+                waiting.forEach(function (callback) { callback(info); });
+            });
+        }
+        function playerFile(entry) {
+            var native = tvPlatform() && /^https:\/\/ashdi\.vip\//i.test(entry.stream || '');
+            var file = playbackFile(entry.stream, !moonPage(entry.url) && entry.streamInfoUrl === entry.stream ? entry.streamInfo : null, native);
+            file.anitube_source_url = entry.url;
+            if (native) { file.hls_type = 'native'; file.anitube_native_prepared = true; }
+            return file;
+        }
+        function prepareStream(entry, url, done) {
+            if (moonPage(entry.url)) return done();
+            if (tvPlatform() && /^https:\/\/ashdi\.vip\//i.test(url)) {
+                done(); // Optional quality metadata never delays native playback.
+                inspectStream(entry, url, function (info) {
+                    var work = Lampa.Player.playdata && Lampa.Player.playdata();
+                    if (closed || !work || work.anitube_owner !== playbackOwner || work.anitube_source_url !== entry.url || work.quality) return;
+                    var file = playbackFile(url, info, true);
+                    if (file.quality) { work.quality = file.quality; if (Lampa.PlayerPanel && Lampa.PlayerPanel.quality) Lampa.PlayerPanel.quality(file.quality, work.url); }
+                });
+                return;
+            }
+            var finished = false;
+            var timer = setTimeout(finish, 1500);
+            function finish() { if (finished) return; finished = true; clearTimeout(timer); done(); }
+            inspectStream(entry, url, finish);
+        }
+        function pumpQuality() {
+            if (launching || closed) return;
+            while (qualityBusy < 2 && qualityQueue.length) {
+                var task = qualityQueue.shift();
+                if (closed || task.current !== token) continue;
+                qualityBusy++;
+                (function (job) {
+                    var entry = job.entry;
+                    function finish(info) {
+                        if (info && !info.height && entry.quality) info = {height: entry.quality, bandwidth: 0};
+                        if (info) qualityCache[entry.url] = info;
+                        entry.quality = info ? info.height : 0;
+                        if (!closed && job.current === token && job.update) job.update(entry.quality);
+                        qualityBusy--; pumpQuality();
+                    }
+                    self.resolve(entry, function (url) {
+                        if (closed || job.current !== token) return finish(null);
+                        inspectStream(entry, url, finish);
+                    }, function () { finish(null); });
+                })(task);
+            }
+        }
 
         this.ask = function () {
             Lampa.Input.edit({free: true, title: 'Пошук (порожнє поле скидає ручну назву)', nosave: true, value: manual}, function (value) {
@@ -1199,6 +2017,9 @@
                 var matchCards = fullNames(movie, extraTerms).map(nameWords).filter(function (c) { return c.length; });
                 list.forEach(function (r) { r.matched = titleScore(r.names || [r.title], matchCards) > 0; });
                 var scored = list.map(function (r) { return {r: r, score: manual ? 1 : titleScore(r.names || [r.title], cards)}; });
+                if (source === 'uaserials' && !manual && fullNames(movie, extraTerms).some(uaserialHasX)) {
+                    scored = scored.filter(function (entry) { return (entry.r.names || [entry.r.title]).some(uaserialHasX); });
+                }
                 // Developer aid: window.anitube_debug = true in the console prints every candidate with its score.
                 try { if (window.anitube_debug) console.log('AniTube search', source, names, scored.map(function (e) { return e.score.toFixed(1) + ' ' + e.r.title + ' [' + (e.r.names || []).join(' | ') + ']'; })); } catch (e) {}
                 if (spec.strict) scored = scored.filter(function (e) { return e.score > 0; });
@@ -1209,7 +2030,7 @@
                     var top = scored[0].score, next = scored[1] ? scored[1].score : 0;
                     var clear = manual || (top >= 11 && next < top * 0.7);
                     // A fuzzy source (AniLibria) never opens one of several results by itself: the right one is picked from the list.
-                    var auto = clear && (!spec.strict || scored.length === 1);
+                    var auto = clear && (!spec.strict || scored.length === 1) && (!spec.confirm || manual);
                     // The text search of uafix and DoramaUA also returns unrelated shows; a lone result that shares no name with the card is shown
                     // for confirmation instead of being opened (it used to open another drama's episodes on an anime's card).
                     var unsure = !!spec.verify && !manual && top <= 0;
@@ -1247,9 +2068,9 @@
                 animeon: {
                     label: 'AnimeOn',
                     fetch: function (q, ok, fail) {
-                        animeonCall('/search', {sources: 'animeon', source: 'animeon', title: q, imdb_id: manual || !/^tt\d+$/.test(imdb) ? '' : imdb}, null, function (data) { ok(animeonCatalog(data)); }, fail);
+                        animeonApi('search', {q: q}, function (data) { ok(animeonCatalog(data)); }, fail);
                     },
-                    failed: function (xhr) { return 'AnimeOn: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    failed: function (xhr, why) { return 'AnimeOn: ' + (why || 'сервер не відповів') + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'AnimeOn: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
                 uafix: {
@@ -1264,6 +2085,12 @@
                     failed: function (xhr) { return 'DoramaUA: сервер каталогу не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'DoramaUA: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
+                uaserials: {
+                    label: 'UA Serials', verify: true, strict: true, confirm: true,
+                    fetch: function (q, ok, fail) { uaserialGet('search', q, function (html) { ok(uaserialCatalog(html)); }, fail); },
+                    failed: function (xhr) { return 'UA Serials: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    nothing: function (m) { return 'UA Serials: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
+                },
                 anilibria: {
                     label: 'AniLibria', strict: true, words: true,
                     fetch: function (q, ok, fail) { anilibriaCall('/app/search/releases?query=' + encodeURIComponent(q), function (data) { ok(anilibriaCatalog(data)); }, fail); },
@@ -1275,6 +2102,7 @@
                 }
             };
             if (source === 'makhno') return this.searchMakhno(queries);
+            if (source === 'uafilms') return this.searchUafilms(queries);
             this.searchMany(specs[source]);
         };
 
@@ -1306,12 +2134,13 @@
             }, function (xhr) {
                 if (closed) return;
                 if (self.nextSource()) return self.search(0);
-                self.empty('Makhno: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+                self.empty('Makhno: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '. Ті самі озвучення Ashdi є в джерелі UAFilms (чип «Джерело»).');
             });
         };
 
         // Picking another source starts the search again from the card's own names.
         this.switchSource = function (name) {
+            playSeq++; launching = false;
             source = name;
             fellBack = true;
             remember(key, {source: name, title: ''});
@@ -1321,6 +2150,7 @@
         };
 
         this.empty = function (message) {
+            playbackMessage = '';
             if (/нічого/.test(message) && !manual && lastQueries.length) {
                 message += ' Шукали: ' + lastQueries.slice(0, 3).map(function (q) { return '«' + q + '»'; }).join(', ') + ' та ще ' + Math.max(0, lastQueries.length - 3) + ' назв.';
             }
@@ -1356,7 +2186,9 @@
         // Every open of a title takes a new number; an answer that arrives for an older number is dropped, so a slow reply for one title can
         // never fill the page of another one.
         this.openTitle = function (selectedTitle, keepFocusOnSeasons) {
+            playSeq++; launching = false;
             item = selectedTitle;
+            playbackMessage = '';
             voices = []; seasons = {}; season = 0;
             var mine = ++openSeq;
             remember(key, {title: item.url});
@@ -1364,7 +2196,9 @@
             if (source === 'uafix') return this.openUafix();
             if (source === 'animeon') return this.openAnimeon();
             if (source === 'makhno') return this.openMakhno();
+            if (source === 'uafilms') return this.openUafilms();
             if (source === 'dorama') return this.openDorama();
+            if (source === 'uaserials') return this.openUaserials();
             if (source === 'anilibria') return this.openAnilibria();
             fetchPlaylist(item.url, function (data) {
                 if (closed || mine !== openSeq) return;
@@ -1373,17 +2207,19 @@
                 if (!data || !data.success || !data.response) return self.empty('AniTube: сайт не повернув список серій.');
                 var all = sources(data.response, item.url);
                 if (!all.length) return self.empty('AniTube: не вдалося розібрати список серій.');
-                var seen = {};
-                voices = all.filter(function (source) { return /ashdi/i.test(source.player); }).map(function (source) {
-                    return {label: voiceLabel(source), episodes: source.episodes};
-                }).filter(function (voice) { return !seen[voice.label] && (seen[voice.label] = true); });
-                if (!voices.length) {
-                    var others = unique(all.map(function (source) { return source.player; })).join(', ');
-                    return self.empty('AniTube: для цього тайтлу немає плеєра Ashdi (доступні: ' + others + ').');
-                }
+                all = all.filter(function (variant) { return !/fenix|фенікс|феникс/i.test(variant.player); });
+                if (!all.length) return self.empty('AniTube: для цього тайтлу є лише плеєр Fenix, а він не працює.');
+                voices = all.map(function (variant) {
+                    var player = /ashdi/i.test(variant.player) ? 'Ashdi' : /moon/i.test(variant.player) ? 'Moon' : variant.player;
+                    return {label: voiceLabel(variant), player: player, episodes: variant.episodes,
+                        supported: player === 'Ashdi' || player === 'Moon' || variant.episodes.every(function (e) { return media(e.url); })};
+                });
+                var firstAshdi = voices.filter(function (v) { return v.supported && v.player === 'Ashdi'; })[0];
+                var firstWorking = firstAshdi || voices.filter(function (v) { return v.supported; })[0];
                 var wantedVoice = saved(key).voice;
-                voiceIndex = 0;
-                voices.forEach(function (voice, index) { if (voice.label === wantedVoice) voiceIndex = index; });
+                voiceIndex = voices.some(function (v) { return v.label === wantedVoice && v.supported; }) ? voiceFor(wantedVoice) : -1;
+                if (voiceIndex < 0 && firstWorking) voiceIndex = voiceFor(firstWorking.label);
+                if (voiceIndex < 0) voiceIndex = 0;
                 self.focusEpisode = !keepFocusOnSeasons;
                 self.draw();
                 self.loading(false);
@@ -1416,6 +2252,10 @@
             var play = item.ref.play;
             ashdiHtml(play, function (html) {
                 if (closed || mine !== openSeq) return;
+                if (ashdiMissing(html)) {
+                    if (self.nextSource()) return self.search(0);
+                    return self.empty('Makhno: Ashdi більше не має цього файлу. Спробуй інше джерело.');
+                }
                 if (/^\/serial\//.test(new URL(play).pathname)) seasons = makhnoSeasons(ashdiPlaylist(html));
                 else seasons = {1: [{label: 'Ashdi', episodes: [{title: 'Фільм', url: play, subs: []}]}]};
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
@@ -1438,6 +2278,65 @@
             this.start(true);
             if (!fresh) focusAt(1, Math.max(0, Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }).indexOf(number)));
         };
+
+        // UAFilms knows the card only by its TMDB number, so there is nothing to search by name: one result, the card itself.
+        this.searchUafilms = function (queries) {
+            if (!/^\d{1,10}$/.test(String(movie.id || ''))) {
+                if (self.nextSource()) return self.search(0);
+                return self.empty('UAFilms: у картки немає номера TMDB. Спробуй інше джерело.');
+            }
+            self.found([{title: displayName() || 'UAFilms', url: 'uafilms:' + movie.id, note: 'UAFilms', ref: {tmdb: String(movie.id)}}], queries);
+        };
+        function uafilmsSeasonNumbers() {
+            if (!isTv) return [1];
+            var listed = (movie.seasons || []).filter(function (s) { return s && s.season_number > 0 && s.episode_count > 0; }).map(function (s) { return s.season_number; });
+            if (listed.length) return listed.sort(function (a, b) { return a - b; });
+            var count = parseInt(movie.number_of_seasons, 10) || 1;
+            return Array.from({length: Math.min(count, 60)}, function (v, i) { return i + 1; });
+        }
+        this.openUafilms = function () {
+            seasons = {};
+            uafilmsSeasonNumbers().forEach(function (number) { seasons[number] = []; });
+            var numbers = Object.keys(seasons).map(Number);
+            var wanted = saved(key).season;
+            this.useUafilmsSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+        };
+        // The voices of a season are the players of its first episode; every episode is then asked for the same voice when it is played.
+        this.useUafilmsSeason = function (number, fresh) {
+            var mine = openSeq, tmdb = item.ref.tmdb;
+            this.loading(true);
+            function fail(message) {
+                if (closed || mine !== openSeq) return;
+                if (fresh && self.nextSource()) return self.search(0);
+                self.empty(message);
+            }
+            uafilmsSources(tmdb, isTv ? number : 0, 1, function (variants) {
+                if (closed || mine !== openSeq) return;
+                if (!variants.length) return fail('UAFilms: для ' + (isTv ? number + ' сезону ' : '') + 'цієї картки немає озвучень з плеєрами Ashdi, UAflix чи Moon.');
+                countEpisodes(number, function (count) {
+                    if (closed || mine !== openSeq) return;
+                    seasons[number] = variants.map(function (variant) {
+                        var episodes = [];
+                        for (var n = 1; n <= count; n++) episodes.push({title: isTv ? 'Серія ' + n : 'Фільм', url: 'uafilms:' + tmdb + ':' + number + ':' + n + ':' + variant.key,
+                            ref: {season: isTv ? number : 0, episode: n, variant: variant.key}, subtitles: []});
+                        return {label: variant.label, player: variant.player, episodes: episodes};
+                    });
+                    self.useMakhnoSeason(number, fresh);
+                });
+            }, function (why) { fail('UAFilms: ' + why + '.'); });
+        };
+        // TMDB's episode count (the card's own season list, then the TMDB season), then the catalogue's season page.
+        function countEpisodes(number, done) {
+            if (!isTv) return done(1);
+            var listed = (movie.seasons || []).filter(function (s) { return s && s.season_number === number; })[0];
+            loadSeason(number).then(function (episodes) {
+                var count = (episodes && episodes.__count) || (listed && listed.episode_count) || 0;
+                if (count) return done(Math.min(count, 2000));
+                $.ajax({url: UAFILMS + '/season?id=' + encodeURIComponent(movie.id) + '&season=' + number, dataType: 'json', timeout: 15000,
+                    success: function (data) { done(Math.max(1, Math.min(((data && data.episodes) || []).length, 2000))); },
+                    error: function () { done(1); }});
+            });
+        }
 
         // DoramaUA: the show's API record names its player; the player page lists every season, episode and voice.
         this.openDorama = function () {
@@ -1463,12 +2362,33 @@
             });
         };
 
+        this.openUaserials = function () {
+            var mine = openSeq;
+            uaserialGet('page', item.url, function (html) {
+                if (closed || mine !== openSeq) return;
+                var iframe = String(html).match(/<iframe\b[^>]*\b(?:data-src|src)=["'](https:\/\/hdvbua\.pro\/embed\/\d+\/[a-f\d]{6,64})["']/i);
+                if (!iframe) return self.empty('UA Serials: на сторінці не знайдено підтримуваного плеєра.');
+                uaserialGet('player', iframe[1], function (playerHtml) {
+                    if (closed || mine !== openSeq) return;
+                    seasons = uaserialPlaylist(playerHtml) || {};
+                    var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
+                    if (!numbers.length) return self.empty('UA Serials: не вдалося прочитати список серій плеєра.');
+                    var wanted = saved(key).season;
+                    self.useMakhnoSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                }, function (xhr) {
+                    if (!closed && mine === openSeq) self.empty('UA Serials: не вдалося прочитати плеєр' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+                });
+            }, function (xhr) {
+                if (!closed && mine === openSeq) self.empty('UA Serials: не вдалося відкрити сторінку тайтлу' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+            });
+        };
+
         // One AnimeOn season: its Ashdi voices become the voices of the screen, in the order the server lists them.
         this.openAnimeon = function () {
             var mine = openSeq;
-            animeonCall('/content', null, {source: 'animeon', ref: item.ref, full: true}, function (data) {
+            animeonLoadVoices(item.ref.id, function (data) {
                 if (closed || mine !== openSeq) return;
-                voices = animeonVoices(data, item.ref.season);
+                voices = data;
                 if (!voices.length) return self.empty('AnimeOn: для цього тайтлу немає озвучень з плеєром Ashdi.');
                 var wantedVoice = saved(key).voice;
                 voiceIndex = 0;
@@ -1477,8 +2397,8 @@
                 self.draw();
                 self.loading(false);
                 self.start(true);
-            }, function (xhr) {
-                if (!closed && mine === openSeq) self.empty('AnimeOn: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+            }, function (xhr, why) {
+                if (!closed && mine === openSeq) self.empty('AnimeOn: ' + (why || 'не вдалося отримати список серій') + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
         };
 
@@ -1531,67 +2451,138 @@
             uafixProbe(plain, build);
         };
 
+        // A UAFilms episode is asked for its players when it is played; the page of the same voice is then read like any other.
+        function uafilmsStream(entry, success, failure) {
+            uafilmsSources(item.ref.tmdb, entry.ref.season, entry.ref.episode, function (variants) {
+                var variant = variants.filter(function (v) { return v.key === entry.ref.variant; })[0];
+                if (!variant) return failure('у цієї серії немає озвучення «' + entry.ref.variant.split('|')[1] + '»: обери інше в чипі «Озвучення»');
+                function done(stream, subtitles) { entry.subtitles = subtitles || []; success(entry.stream = stream); }
+                if (moonPage(variant.page)) {
+                    entry.url = variant.page; // the Moon player switch on TVs looks at the episode's own page
+                    return moonStream(variant.page, function (stream, subtitles, quality) { entry.streamAt = Date.now(); entry.quality = quality || entry.quality || 0; done(stream, subtitles); }, failure);
+                }
+                if (zetPage(variant.page)) return zetStream(variant.page, done, failure);
+                ashdiStream(variant.page, done, failure);
+            }, failure);
+        }
+
         // 3. episode list with watch progress; the whole list becomes the player's playlist
-        this.resolve = function (entry, success, failure) {
-            if (entry.stream) return success(entry.stream);
+        function resolveEntry(entry, success, failure) {
+            if (entry.supported === false) return failure('плеєр ' + entry.player + ' поки не підтримується');
+            if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry))) return success(entry.stream);
+            if (source === 'uafilms' && entry.ref && entry.ref.variant) return uafilmsStream(entry, success, failure);
             if (source === 'uafix') return uafixStream(entry.url, entry.kind, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (source === 'dorama') return doramaStream(entry.ref, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (source === 'animeon') return animeonStream(entry.ref, entry.wantSubtitles, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (media(entry.url)) return success(entry.stream = entry.url);
+            if (moonPage(entry.url)) return moonStream(entry.url, function (stream, subtitles, quality) { entry.streamAt = Date.now(); entry.subtitles = subtitles; entry.quality = quality || entry.quality || 0; success(entry.stream = stream); }, failure);
             if (!ashdiPage(entry.url)) return failure('плеєр не підтримується');
             ashdiStream(entry.url, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
+        }
+
+        this.resolve = function (entry, success, failure) {
+            if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry))) return success(entry.stream);
+            if (entry.resolving) { entry.resolving.push([success, failure]); return; }
+            entry.resolving = [[success, failure]];
+            var done = false;
+            var limit = source === 'uafilms' ? 45 : 20;
+            var timer = setTimeout(function () { finish('', 'джерело не відповіло за ' + limit + ' секунд'); }, limit * 1000);
+            function finish(url, why) {
+                if (done) return;
+                done = true; clearTimeout(timer);
+                var listeners = entry.resolving; entry.resolving = null;
+                listeners.forEach(function (pair) { if (url) pair[0](url); else pair[1](why); });
+            }
+            resolveEntry(entry, function (url) { finish(url, ''); }, function (why) { finish('', why); });
         };
 
         this.play = function (index) {
+            if (closed) return;
             var entry = entries[index];
             if (!entry || entry.loading) return;
-            entry.loading = true;
-            Lampa.Noty.show('AniTube v' + VERSION + ': ' + ((item && item.title) || '') + ' · ' + entry.info.label + '…');
+            if (entry.supported === false) return Lampa.Noty.show('AniTube: плеєр ' + entry.player + ' поки не підтримується. Обери інший плеєр угорі.');
+            var mine = openSeq, playingToken = token, request = ++playSeq;
+            entry.loading = true; launching = true;
+            self.activity.loader(true);
+            Lampa.Noty.show('AniTube v' + VERSION + ' · ' + entry.info.label + (source === 'uafilms' && !entry.stream ? ' · UAFilms шукає серію, вперше це може тривати до 30 секунд' : ''));
             // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
             // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
             // the rest stays lazy for Lampa's built-in player.
             var behind = PLAYLIST_BEHIND, ahead = PLAYLIST_AHEAD;
             if (source === 'uafix') { behind = UAFIX_BEHIND; ahead = UAFIX_AHEAD; }
+            if (source === 'uafilms') { behind = 0; ahead = 0; }
             if (source === 'animeon') { behind = ANIMEON_BEHIND; ahead = ANIMEON_AHEAD; }
             if (source === 'dorama') { behind = DORAMA_BEHIND; ahead = DORAMA_AHEAD; }
-            var from = Math.max(0, index - behind), to = Math.min(entries.length - 1, index + ahead);
-            var pending = to - from + 1, failure = '';
-            function settled() {
-                if (--pending > 0) return;
+            var android = Lampa.Platform && Lampa.Platform.is('android');
+            var from = android ? Math.max(0, index - behind) : index, to = android ? Math.min(entries.length - 1, index + ahead) : index;
+            var pending = to - from + 1, failure = '', selectedFailure = '', failed = [], started = false, grace = null;
+            // The chosen episode starts as soon as its own address is ready. Neighbours get NEIGHBOUR_GRACE more;
+            // one slow neighbour used to hold the whole start for up to 25 seconds. Late ones stay lazy items.
+            function settled(next, why) {
+                pending--;
+                if (why) failed.push(next);
+                if (next === entry && pending > 0 && !why) grace = setTimeout(launch, NEIGHBOUR_GRACE);
+                if (pending <= 0 || (next === entry && why)) launch();
+            }
+            function launch() {
+                if (started) return;
+                started = true; clearTimeout(grace);
                 entry.loading = false;
-                if (closed) return;
-                if (!entry.stream) {
-                    Lampa.Noty.show('AniTube: не вдалося отримати відео (' + reason(failure) + '). Спробуй іншу серію чи озвучення.', {time: 6000});
+                if (closed || mine !== openSeq || playingToken !== token || request !== playSeq) return;
+                self.activity.loader(false);
+                if (!entry.stream || selectedFailure) {
+                    launching = false;
+                    playbackStatus(moonPage(entry.url) ? 'AT-M1' : 'AT-P1', 'Не вдалося отримати відео: ' + reason(selectedFailure || failure) + '. Спробуй іншу серію чи плеєр.');
                     return;
                 }
                 try { if (movie.id) Lampa.Favorite.add('history', movie, 100); } catch (e) {}
                 // Lampa's player prints the card's title above the episode; a card without a translation shows the original name.
                 var shown = (item && source !== 'anilibria' && item.title) || displayName(); // AniLibria's own titles are Russian
                 var card = Object.assign({}, movie, {title: shown, name: shown});
-                var first = {title: entry.title, url: entry.stream, timeline: entry.timeline, card: card};
+                playbackStatus('', '');
+                var first = Object.assign({title: entry.title, timeline: entry.timeline, card: card, anitube_owner: playbackOwner, anitube_version_shown: true, anitube_moon: !!moonPage(entry.url)}, playerFile(entry));
                 if (entry.subtitles && entry.subtitles.length) first.subtitles = entry.subtitles;
                 var playlist = [];
                 entries.forEach(function (other, n) {
                     if (n === index) return playlist.push(first);
-                    if (other.stream) return playlist.push({title: other.title, url: other.stream, timeline: other.timeline, card: card, subtitles: other.subtitles && other.subtitles.length ? other.subtitles : undefined});
-                    if (n >= from && n <= to) return; // resolution failed, leave it out
+                    if (android && other.stream) return playlist.push(Object.assign({title: other.title, timeline: other.timeline, card: card, anitube_owner: playbackOwner, anitube_moon: !!moonPage(other.url), subtitles: other.subtitles && other.subtitles.length ? other.subtitles : undefined}, playerFile(other)));
+                    if (android && failed.indexOf(other) >= 0 && !moonPage(other.url)) return; // resolution failed, leave it out
                     var cell = {
                         title: other.title,
                         timeline: other.timeline,
                         card: card,
+                        anitube_owner: playbackOwner, anitube_moon: !!moonPage(other.url),
                         url: function (call) {
-                            self.resolve(other, function (url) { cell.url = url; if (other.subtitles && other.subtitles.length) cell.subtitles = other.subtitles; call(); }, function () { cell.url = ''; call(); });
+                            self.resolve(other, function (url) {
+                                function ready() { Object.assign(cell, playerFile(other)); if (other.subtitles && other.subtitles.length) cell.subtitles = other.subtitles; call(); }
+                                prepareStream(other, url, ready);
+                            }, function () { cell.url = ''; call(); });
                         }
                     };
                     playlist.push(cell);
                 });
+                if (first.anitube_moon) useMoonPlayer();
+                if (first.anitube_native_prepared) useNativePlayback(playbackOwner);
+                cleanPlayer(true);
                 Lampa.Player.play(first);
                 // The playlist lets the player's next/previous buttons switch episodes without leaving it.
                 Lampa.Player.playlist(playlist);
             }
-            for (var n = from; n <= to; n++) {
-                this.resolve(entries[n], settled, function (why) { if (!failure) failure = why; settled(); });
-            }
+            for (var n = from; n <= to; n++) (function (next) {
+                var done = false;
+                var wait = source === 'uafilms' ? 50 : 25;
+                var deadline = setTimeout(function () { finish('сервер не відповів за ' + wait + ' секунд'); }, wait * 1000);
+                function finish(why) {
+                    if (done) return;
+                    done = true; clearTimeout(deadline);
+                    if (why && !failure) failure = why;
+                    if (why && next === entry) selectedFailure = why;
+                    settled(next, why);
+                }
+                self.resolve(next, function (url) {
+                    prepareStream(next, url, function () { finish(''); });
+                }, finish);
+            })(entries[n]);
         };
 
         this.start = function (first) {
@@ -1618,6 +2609,12 @@
         this.stop = function () {};
         this.destroy = function () {
             closed = true;
+            if (moonWatchStop) moonWatchStop();
+            if (moonQualityStop) moonQualityStop();
+            if (playbackListener && Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('start', playbackListener);
+            if (playerCloseListener && Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('destroy', playerCloseListener);
+            cleanPlayer(false);
+            restoreNativePlayback(playbackOwner);
             try { scroll.destroy(); } catch (e) {}
             if (html) html.remove();
             html = null;
@@ -1632,12 +2629,16 @@
         // Look copied from the UAKino series page. No flex "gap": the TV's old browser ignores it, so spacing is done with margins.
         $('head').append('<style>' +
             '.atp{height:100%}.atp__body{padding:1.2em 3em 3em 4.2em}' +
+            '.anitube-player .player-panel__next-episode-name,.anitube-player .player-info__error,.anitube-player .value--stat{display:none!important}' +
             '.atp__head{margin-bottom:1em}.atp__title{font-size:2.4em;font-weight:800;line-height:1.1}.atp__meta{margin-top:.35em;opacity:.6;font-size:1.15em}' +
             '.atp__row{display:flex;flex-wrap:wrap;margin-bottom:.4em}' +
             '.atp-chip{display:flex;align-items:baseline;padding:.6em 1.2em;margin:0 .7em .7em 0;border-radius:2em;background:rgba(255,255,255,.1);font-size:1.15em;font-weight:600}' +
+            '.atp-chip--sort svg{display:block;width:2em;height:1.3em}.atp-chip--sort .atp-chip__v{display:none}' +
             '.atp-chip__v{margin-left:.55em;opacity:.65;font-weight:500}' +
+            '.atp-icon{display:inline-block;width:.85em;height:.85em;vertical-align:middle}.atp-chip__v .atp-icon{margin-left:.45em}.atp-ep__st .atp-icon{margin-right:.4em}' +
             '.atp-chip--on{background:#1F6FEB;color:#fff}.atp-chip--on .atp-chip__v{opacity:.85}' +
             '.atp-chip.focus{background:#fff;color:#0b0d12}.atp-chip.focus .atp-chip__v{opacity:.7}' +
+            '.atp-playback-status{padding:.5em 0;font-size:1.1em;color:#f0cd8c}.atp-playback-status:empty{display:none}' +
             '.atp__list{margin-top:.8em}.atp__note{opacity:.7;font-size:1.2em;padding:1em 0}' +
             '.atp-ep{display:flex;align-items:stretch;padding:.7em;margin-bottom:.7em;border-radius:1em;background:rgba(255,255,255,.06)}' +
             '.atp-ep__img{position:relative;flex:0 0 13em;height:7.4em;margin-right:1.2em;border-radius:.7em;overflow:hidden;background:linear-gradient(135deg,#1c2230,#10131b)}' +
@@ -1661,8 +2662,19 @@
             Lampa.SettingsApi.addComponent({component: 'anitube', icon: ICON, name: 'AniTube'});
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
+                param: {name: 'anitube_version', type: 'button'},
+                field: {name: 'Версія ' + VERSION, description: 'Фактично завантажена версія AniTube.'},
+                onChange: function () { Lampa.Noty.show('AniTube v' + VERSION); }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
                 param: {name: 'anitube_russian', type: 'trigger', 'default': false},
                 field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria (російська озвучка, вищий бітрейт).'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_auto_quality', type: 'trigger', 'default': true},
+                field: {name: 'Знижувати якість Moon при поганому зв\'язку', description: 'Увімкнено: якщо відео зависає, якість падає на один крок. Вимкнено: завжди максимальна якість. Лише для Moon на ТВ.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
@@ -1716,6 +2728,7 @@
     function start() {
         if (window.plugin_anitube_prototype_ready) return;
         window.plugin_anitube_prototype_ready = true;
+        restoreMoonPlayer();
         addTemplates();
         addSettings();
         // Registered up front so Lampa can restore the screen after a restart.
