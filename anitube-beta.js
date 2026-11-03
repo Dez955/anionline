@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.15';
+    var VERSION = '1.8.17';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -263,7 +263,8 @@
         var listener = Lampa.PlayerVideo && Lampa.PlayerVideo.listener;
         if (!listener || !listener.follow || !listener.remove) return function () {};
         var ended = false;
-        var timer = setTimeout(function () { fail('AT-M4', 'Moon: відео не почало відтворюватися за 25 секунд. Обери інший плеєр.'); }, 25000);
+        var prefix = work.anitube_moon === false ? 'AT-P' : 'AT-M';
+        var timer = setTimeout(function () { fail(prefix + '4', 'Плеєр не почав відтворення за 25 секунд. Спробуй інший плеєр.'); }, 25000);
         function stop() {
             if (ended) return;
             ended = true; clearTimeout(timer);
@@ -281,7 +282,9 @@
         }
         function error(event) {
             if (!event || !event.fatal) return;
-            fail('AT-M3', 'Moon: хостинг не віддав відео або його фрагмент. Обери Ashdi чи інший плеєр.');
+            var detail = String(event.error || event.details || '');
+            var reason = /manifest/i.test(detail) ? 'Не завантажився список відеопотоку.' : 'Хостинг не віддав відео або його фрагмент.';
+            fail(prefix + '3', reason + ' Спробуй інший плеєр.');
         }
         listener.follow('canplay', ready); listener.follow('timeupdate', progress); listener.follow('error', error);
         if (Lampa.Player.listener && Lampa.Player.listener.follow) Lampa.Player.listener.follow('destroy', stop);
@@ -1346,6 +1349,11 @@
         var body = $('body')[0];
         if (body && body.classList) body.classList.toggle('anitube-player', !!on);
     }
+    function playbackVersion(work, owner) {
+        if (!work || work.anitube_owner !== owner) return;
+        if (work.anitube_version_shown) { delete work.anitube_version_shown; return; }
+        Lampa.Noty.show('AniTube v' + VERSION + (work.title ? ' · ' + work.title : ''));
+    }
 
     // Indices only: the caller's entries and progress objects are never reordered in place.
     // Numbered episodes sort numerically; specials with no number remain after them in source order.
@@ -1391,6 +1399,7 @@
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
         var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'dorama', 'uaserials', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var playSeq = 0, launching = false;
         var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
         var playbackOwner = 'anitube-' + Date.now() + '-' + Math.random();
         var seasons = {}, season = 0;
@@ -1491,16 +1500,17 @@
             html.append(scroll.render());
             if (Lampa.Player.listener && Lampa.Player.listener.follow) {
                 playbackListener = function (work) {
+                    playbackVersion(work, playbackOwner);
                     cleanPlayer(work && work.anitube_owner === playbackOwner);
                     if (moonWatchStop) { moonWatchStop(); moonWatchStop = null; }
                     if (moonQualityStop) { moonQualityStop(); moonQualityStop = null; }
-                    if (work && work.anitube_owner === playbackOwner && work.anitube_moon) {
+                    if (work && work.anitube_owner === playbackOwner) {
                         moonWatchStop = watchMoonPlayback(work, playbackStatus);
-                        if (tvPlatform()) moonQualityStop = watchMoonQuality();
+                        if (work.anitube_moon && tvPlatform()) moonQualityStop = watchMoonQuality();
                     }
                 };
                 Lampa.Player.listener.follow('start', playbackListener);
-                playerCloseListener = function () { cleanPlayer(false); };
+                playerCloseListener = function () { launching = false; cleanPlayer(false); };
                 Lampa.Player.listener.follow('destroy', playerCloseListener);
             }
             this.activity.loader(true);
@@ -1757,9 +1767,19 @@
             });
         }
         function playerFile(entry) {
-            return playbackFile(entry.stream, !moonPage(entry.url) && entry.streamInfoUrl === entry.stream ? entry.streamInfo : null);
+            var file = playbackFile(entry.stream, !moonPage(entry.url) && entry.streamInfoUrl === entry.stream ? entry.streamInfo : null);
+            if (tvPlatform() && /^https:\/\/ashdi\.vip\//i.test(entry.stream || '')) file.hls_type = 'native';
+            return file;
+        }
+        function prepareStream(entry, url, done) {
+            if (moonPage(entry.url)) return done();
+            var finished = false;
+            var timer = setTimeout(finish, 1500);
+            function finish() { if (finished) return; finished = true; clearTimeout(timer); done(); }
+            inspectStream(entry, url, finish);
         }
         function pumpQuality() {
+            if (launching || closed) return;
             while (qualityBusy < 2 && qualityQueue.length) {
                 var task = qualityQueue.shift();
                 if (closed || task.current !== token) continue;
@@ -1950,6 +1970,7 @@
 
         // Picking another source starts the search again from the card's own names.
         this.switchSource = function (name) {
+            playSeq++; launching = false;
             source = name;
             fellBack = true;
             remember(key, {source: name, title: ''});
@@ -1995,6 +2016,7 @@
         // Every open of a title takes a new number; an answer that arrives for an older number is dropped, so a slow reply for one title can
         // never fill the page of another one.
         this.openTitle = function (selectedTitle, keepFocusOnSeasons) {
+            playSeq++; launching = false;
             item = selectedTitle;
             playbackMessage = '';
             voices = []; seasons = {}; season = 0;
@@ -2200,7 +2222,7 @@
         };
 
         // 3. episode list with watch progress; the whole list becomes the player's playlist
-        this.resolve = function (entry, success, failure) {
+        function resolveEntry(entry, success, failure) {
             if (entry.supported === false) return failure('плеєр ' + entry.player + ' поки не підтримується');
             if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry))) return success(entry.stream);
             if (source === 'uafix') return uafixStream(entry.url, entry.kind, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
@@ -2210,14 +2232,32 @@
             if (moonPage(entry.url)) return moonStream(entry.url, function (stream, subtitles, quality) { entry.streamAt = Date.now(); entry.subtitles = subtitles; entry.quality = quality || entry.quality || 0; success(entry.stream = stream); }, failure);
             if (!ashdiPage(entry.url)) return failure('плеєр не підтримується');
             ashdiStream(entry.url, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
+        }
+
+        this.resolve = function (entry, success, failure) {
+            if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry))) return success(entry.stream);
+            if (entry.resolving) { entry.resolving.push([success, failure]); return; }
+            entry.resolving = [[success, failure]];
+            var done = false;
+            var timer = setTimeout(function () { finish('', 'джерело не відповіло за 20 секунд'); }, 20000);
+            function finish(url, why) {
+                if (done) return;
+                done = true; clearTimeout(timer);
+                var listeners = entry.resolving; entry.resolving = null;
+                listeners.forEach(function (pair) { if (url) pair[0](url); else pair[1](why); });
+            }
+            resolveEntry(entry, function (url) { finish(url, ''); }, function (why) { finish('', why); });
         };
 
         this.play = function (index) {
+            if (closed) return;
             var entry = entries[index];
             if (!entry || entry.loading) return;
             if (entry.supported === false) return Lampa.Noty.show('AniTube: плеєр ' + entry.player + ' поки не підтримується. Обери інший плеєр угорі.');
-            var mine = openSeq, playingToken = token;
-            entry.loading = true;
+            var mine = openSeq, playingToken = token, request = ++playSeq;
+            entry.loading = true; launching = true;
+            self.activity.loader(true);
+            Lampa.Noty.show('AniTube v' + VERSION + ' · ' + entry.info.label);
             // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
             // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
             // the rest stays lazy for Lampa's built-in player.
@@ -2225,14 +2265,17 @@
             if (source === 'uafix') { behind = UAFIX_BEHIND; ahead = UAFIX_AHEAD; }
             if (source === 'animeon') { behind = ANIMEON_BEHIND; ahead = ANIMEON_AHEAD; }
             if (source === 'dorama') { behind = DORAMA_BEHIND; ahead = DORAMA_AHEAD; }
-            var from = Math.max(0, index - behind), to = Math.min(entries.length - 1, index + ahead);
-            var pending = to - from + 1, failure = '';
+            var android = Lampa.Platform && Lampa.Platform.is('android');
+            var from = android ? Math.max(0, index - behind) : index, to = android ? Math.min(entries.length - 1, index + ahead) : index;
+            var pending = to - from + 1, failure = '', selectedFailure = '';
             function settled() {
                 if (--pending > 0) return;
                 entry.loading = false;
-                if (closed || mine !== openSeq || playingToken !== token) return;
-                if (!entry.stream) {
-                    playbackStatus(moonPage(entry.url) ? 'AT-M1' : 'AT-P1', 'Не вдалося отримати відео: ' + reason(failure) + '. Спробуй іншу серію чи плеєр.');
+                if (closed || mine !== openSeq || playingToken !== token || request !== playSeq) return;
+                self.activity.loader(false);
+                if (!entry.stream || selectedFailure) {
+                    launching = false;
+                    playbackStatus(moonPage(entry.url) ? 'AT-M1' : 'AT-P1', 'Не вдалося отримати відео: ' + reason(selectedFailure || failure) + '. Спробуй іншу серію чи плеєр.');
                     return;
                 }
                 try { if (movie.id) Lampa.Favorite.add('history', movie, 100); } catch (e) {}
@@ -2240,13 +2283,13 @@
                 var shown = (item && source !== 'anilibria' && item.title) || displayName(); // AniLibria's own titles are Russian
                 var card = Object.assign({}, movie, {title: shown, name: shown});
                 playbackStatus('', '');
-                var first = Object.assign({title: entry.title, timeline: entry.timeline, card: card, anitube_owner: playbackOwner, anitube_moon: !!moonPage(entry.url)}, playerFile(entry));
+                var first = Object.assign({title: entry.title, timeline: entry.timeline, card: card, anitube_owner: playbackOwner, anitube_version_shown: true, anitube_moon: !!moonPage(entry.url)}, playerFile(entry));
                 if (entry.subtitles && entry.subtitles.length) first.subtitles = entry.subtitles;
                 var playlist = [];
                 entries.forEach(function (other, n) {
                     if (n === index) return playlist.push(first);
-                    if (other.stream && (!moonPage(other.url) || (Lampa.Platform && Lampa.Platform.is('android')))) return playlist.push(Object.assign({title: other.title, timeline: other.timeline, card: card, anitube_owner: playbackOwner, anitube_moon: !!moonPage(other.url), subtitles: other.subtitles && other.subtitles.length ? other.subtitles : undefined}, playerFile(other)));
-                    if (n >= from && n <= to && !moonPage(other.url)) return; // resolution failed, leave it out
+                    if (android && other.stream) return playlist.push(Object.assign({title: other.title, timeline: other.timeline, card: card, anitube_owner: playbackOwner, anitube_moon: !!moonPage(other.url), subtitles: other.subtitles && other.subtitles.length ? other.subtitles : undefined}, playerFile(other)));
+                    if (android && n >= from && n <= to && !moonPage(other.url)) return; // resolution failed, leave it out
                     var cell = {
                         title: other.title,
                         timeline: other.timeline,
@@ -2255,7 +2298,7 @@
                         url: function (call) {
                             self.resolve(other, function (url) {
                                 function ready() { Object.assign(cell, playerFile(other)); if (other.subtitles && other.subtitles.length) cell.subtitles = other.subtitles; call(); }
-                                if (moonPage(other.url)) ready(); else inspectStream(other, url, ready);
+                                prepareStream(other, url, ready);
                             }, function () { cell.url = ''; call(); });
                         }
                     };
@@ -2274,10 +2317,11 @@
                     if (done) return;
                     done = true; clearTimeout(deadline);
                     if (why && !failure) failure = why;
+                    if (why && next === entry) selectedFailure = why;
                     settled();
                 }
                 self.resolve(next, function (url) {
-                    if (moonPage(next.url)) finish(''); else inspectStream(next, url, function () { finish(''); });
+                    prepareStream(next, url, function () { finish(''); });
                 }, finish);
             })(entries[n]);
         };
