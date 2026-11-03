@@ -261,6 +261,30 @@ async function moonPage(raw) {
   return html(text);
 }
 
+// Fixed public API routes; callers cannot choose an upstream host or arbitrary path.
+async function animeonCatalogApi(action, params) {
+  let path;
+  const id = params.get('id') || '';
+  if (action === 'search') {
+    const q = (params.get('q') || '').trim();
+    if (!q || q.length > 200) return json({error: 'invalid_query'}, 400);
+    path = '/anime?search=' + encodeURIComponent(q);
+  } else {
+    if (!/^\d{1,10}$/.test(id)) return json({error: 'invalid_id'}, 400);
+    if (action === 'translations') path = '/player/' + id + '/translations';
+    else if (action === 'episodes') {
+      const player = params.get('player') || '', translation = params.get('translation') || '', skip = params.get('skip') || '0';
+      if (!/^\d{1,10}$/.test(player) || !/^\d{1,10}$/.test(translation) || !/^\d{1,5}$/.test(skip) || Number(skip) > 20000) return json({error: 'invalid_episode_query'}, 400);
+      path = '/player/' + id + '/episodes?take=100&skip=' + skip + '&playerId=' + player + '&translationId=' + translation;
+    } else return json({error: 'not_found'}, 404);
+  }
+  const response = await fetch('https://animeon.club/api' + path, {redirect: 'manual', signal: AbortSignal.timeout(8000), headers: {'User-Agent': USER_AGENT, Accept: 'application/json'}});
+  const text = await read(response);
+  let data;
+  try { data = JSON.parse(text); } catch { throw new UpstreamError('AnimeOn не повернув JSON'); }
+  return json(data);
+}
+
 // AnimeOn's public answer for one episode: only the Ashdi page address goes back.
 async function animeonEpisode(id) {
   if (!/^\d{1,10}$/.test(id)) return json({ error: 'invalid_animeon_id' }, 400);
@@ -288,6 +312,7 @@ export default {
       if (url.pathname === '/playlist') return await playlist(url.searchParams.get('url') || '');
       if (url.pathname === '/moon') return await moonPage(url.searchParams.get('url') || '');
       if (url.pathname === '/animeon') return await animeonEpisode(url.searchParams.get('id') || '');
+      if (['/animeon/search', '/animeon/translations', '/animeon/episodes'].includes(url.pathname)) return await animeonCatalogApi(url.pathname.split('/')[2], url.searchParams);
       if (url.pathname === '/embed') return await embed(url.searchParams.get('url') || '', env);
       if (['/uf/search', '/uf/page', '/uf/episode'].includes(url.pathname)) {
         const relayed = await ufRelay(url.pathname.slice(4), url, env);

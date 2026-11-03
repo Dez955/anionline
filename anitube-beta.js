@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.13';
+    var VERSION = '1.8.15';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -270,7 +270,7 @@
             listener.remove('canplay', ready); listener.remove('timeupdate', progress); listener.remove('error', error);
             if (Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('destroy', stop);
         }
-        function ready() { if (!ended) { stop(); report('', 'Moon: відео готове до перегляду.'); } }
+        function ready() { if (!ended) { stop(); report('', ''); } }
         function progress(event) { if (event && Number(event.currentTime || event.time) > 0) ready(); }
         function fail(code, message) {
             if (ended) return;
@@ -329,7 +329,11 @@
     function watchMoonQuality() {
         var player = Lampa.PlayerVideo, listener = player && player.listener;
         if (!listener || !listener.follow || !listener.remove || !player.video) return function () {};
-        var levels = [], video = null, timer = null, stalls = [], calm = 0, lowered = false, stopped = false;
+        var levels = [], video = null, timer = null, stalls = [], calm = 0, initialized = false, stopped = false;
+        function showLevel(level) {
+            var panel = Lampa.PlayerPanel;
+            if (level && panel && panel.render) panel.render().find('.player-panel__quality').text(level.title || level.height + 'p');
+        }
         function ordered() {
             return levels.slice().sort(function (a, b) { return (Number(b.height) || 0) - (Number(a.height) || 0); });
         }
@@ -340,8 +344,8 @@
             calm = Date.now() + 30000;
             var list = ordered(), next = list[Math.max(0, list.findIndex(function (level) { return level.selected; })) + 1];
             if (!next) return;
-            lowered = true;
             next.enabled = true;
+            showLevel(next);
             Lampa.Noty.show('Погане з\'єднання, знижую якість' + (next.title ? ' до ' + next.title : ''), {time: 6000});
         }
         function waiting() {
@@ -360,6 +364,7 @@
         }
         function onLevels(event) {
             levels = (event && event.levels) || [];
+            levels.forEach(function (level) { level.quality = level.title || level.height + 'p'; });
             var next = player.video();
             if (next !== video && next && next.addEventListener) {
                 release();
@@ -368,7 +373,10 @@
                 video.addEventListener('playing', clearStall);
             }
             var top = ordered()[0];
-            if (top && !top.selected && !lowered) top.enabled = true;
+            if (top && !initialized) { top.enabled = true; initialized = true; }
+            if (Lampa.PlayerPanel && Lampa.PlayerPanel.quality) Lampa.PlayerPanel.quality(levels, '');
+            var selected = levels.filter(function (level) { return level.selected; })[0];
+            showLevel(selected);
         }
         function stop() {
             if (stopped) return;
@@ -841,9 +849,7 @@
         return seasons;
     }
 
-    // ---- Third source: AnimeOn (animeon.club) through the aggregator behind the "Bandera Online" Lampa plugin -------------
-    // That server lists AnimeOn's titles and voices and turns an episode into an Ashdi stream address. It answers browsers from any
-    // site (CORS), so TVs call it directly. It is someone else's service: if it changes or disappears this source stops working.
+    // AnimeOn uses its own public API. The legacy aggregator below remains only for Makhno's TMDB mapping.
     var ANIMEON_API = 'https://bbe.lme.isroot.in/api/v2';
     var SOURCE_NAMES = {anitube: 'AniTube', makhno: 'Makhno', animeon: 'AnimeOn', uafix: 'UAflix', dorama: 'DoramaUA', uaserials: 'UA Serials', anilibria: 'AniLibria (рос.)'};
     function animeonCall(path, query, body, success, failure) {
@@ -858,32 +864,62 @@
         }
         $.ajax(settings);
     }
-    function animeonCatalog(data) {
-        var seen = {};
-        return ((data && data.items) || []).map(function (item) {
-            var ref = item && item.ref;
-            if (!item || item.source !== 'animeon' || !ref || !/^\d{1,10}$/.test(String(ref.id))) return null;
-            var url = 'animeon:' + ref.id + ':' + (ref.season || 1);
-            if (seen[url]) return null;
-            seen[url] = true;
-            var title = String(item.title || '').replace(/\s+/g, ' ').trim();
-            if (!title) return null;
-            var year = String(item.year || '');
-            return {title: title, names: [title, item.title_en], url: url, note: [year, item.title_en].filter(Boolean).join(' · '), year: year, ref: {id: ref.id, season: ref.season || 1}};
-        }).filter(Boolean);
+    // Read the site's public API directly on Android, through the owner's Worker on TVs.
+    function animeonApi(action, params, success, failure) {
+        var paths = {search: '/anime?search=' + encodeURIComponent(params.q || ''),
+            translations: '/player/' + params.id + '/translations',
+            episodes: '/player/' + params.id + '/episodes?take=100&skip=' + (params.skip || 0) + '&playerId=' + params.player + '&translationId=' + params.translation};
+        function read(value) {
+            try { value = typeof value === 'string' ? JSON.parse(value) : value; } catch (e) { return failure(null, 'invalid_json'); }
+            success(value);
+        }
+        direct('https://animeon.club/api' + paths[action], {dataType: 'text', headers: {'Referer': '', 'Accept': 'application/json'}}, read, function () {
+            var query = Object.keys(params).map(function (key) { return key + '=' + encodeURIComponent(params[key]); }).join('&');
+            $.ajax({url: homeProxy() + '/animeon/' + action + '?' + query + '&key=' + encodeURIComponent(homeKey()), dataType: 'text', timeout: 20000, success: read,
+                error: function (xhr) { failure(xhr, xhr && xhr.status === 404 ? 'онови Worker у Cloudflare для прямого AnimeOn' : 'AnimeOn не відповів'); }});
+        });
     }
-    // Only voices that come as an Ashdi player are kept, the one player this plugin can play. "[Ashdi] Рідний Голос" becomes "Рідний Голос".
-    function animeonVoices(data, season) {
-        return ((data && data.voices) || []).map(function (voice) {
-            var name = String(voice.display_name || voice.id || '');
-            if (!/^\[Ashdi\]/i.test(name)) return null;
-            var seasons = voice.seasons || [];
-            var chosen = seasons.filter(function (entry) { return Number(entry.title) === Number(season); })[0] || seasons[0];
-            var episodes = ((chosen && chosen.episodes) || []).filter(function (e) { return e && e.number && e.ref && e.ref.episode_id; }).map(function (e) {
-                return {title: 'Серія ' + e.number, url: 'animeon:' + e.ref.episode_id, ref: e.ref, subtitles: true};
+    function animeonCatalog(data) {
+        return ((data && (data.results || data.result)) || []).filter(function (item) { return item && /^\d{1,10}$/.test(String(item.id)); }).map(function (item) {
+            var title = String(item.titleUa || item.title || '').trim();
+            return {title: title, names: [title, item.titleEn], url: 'animeon:' + item.id + ':1', year: String(item.year || (item.releaseDate || '').slice(0, 4)),
+                note: item.titleEn || '', ref: {id: item.id, season: 1}};
+        }).filter(function (item) { return !!item.title; });
+    }
+    function animeonLoadVoices(id, success, failure) {
+        animeonApi('translations', {id: id}, function (data) {
+            var jobs = [];
+            (data.translations || []).forEach(function (item) {
+                if (!item.translation) return;
+                (item.player || []).filter(function (player) { return /ashdi/i.test(player.name); }).forEach(function (player) {
+                    jobs.push({label: String(item.translation.name || 'Українська озвучка').replace(/\s*\|\s*/g, ' · ').trim(), player: 'Ashdi', episodes: [], translation: item.translation.id, playerId: player.id});
+                });
             });
-            return episodes.length ? {label: name.replace(/^\[Ashdi\]\s*/i, '').replace(/\s*\|\s*/g, ' · ').trim(), episodes: episodes} : null;
-        }).filter(Boolean);
+            if (!jobs.length) return success([]);
+            var pending = jobs.length, failed = false;
+            function fail(xhr, why) { if (!failed) { failed = true; failure(xhr, why); } }
+            jobs.forEach(function (job) {
+                function page(skip) {
+                    animeonApi('episodes', {id: id, player: job.playerId, translation: job.translation, skip: skip}, function (data) {
+                        if (failed) return;
+                        var episodes = data.episodes || [], before = job.episodes.length;
+                        episodes.forEach(function (episode) {
+                            if (!/^\d{1,10}$/.test(String(episode.id)) || !Number.isFinite(Number(episode.episode))) return;
+                            if (job.episodes.some(function (entry) { return entry.ref.episode_id === episode.id; })) return;
+                            job.episodes.push({title: Number(episode.episode) === 0 ? 'Спецвипуск 0' : 'Серія ' + episode.episode,
+                                url: 'animeon:' + episode.id, ref: {episode_id: episode.id}, subtitles: true});
+                        });
+                        if (data.pagination && data.pagination.hasMore && episodes.length) {
+                            if (before === job.episodes.length) return fail(null, 'AnimeOn повторив сторінку серій');
+                            if (skip >= 20000) return fail(null, 'завеликий список серій');
+                            return page(skip + episodes.length);
+                        }
+                        if (--pending === 0) success(jobs.filter(function (voice) { return voice.episodes.length; }));
+                    }, fail);
+                }
+                page(0);
+            });
+        }, failure);
     }
     // AnimeOn's own API names the episode's Ashdi page. It has no CORS, so a TV asks through the owner's Worker.
     function animeonPlayerPage(id, success, failure) {
@@ -906,19 +942,9 @@
         direct('https://animeon.club/api/player/' + id + '/episode', {dataType: 'text'}, read, proxy);
     }
     function animeonStream(ref, wantSubtitles, success, failure) {
-        function aggregator(why) {
-            animeonCall('/stream', null, {source: 'animeon', ref: ref}, function (data) {
-                var stream = data && data.ok && data.streams && data.streams[0] && absolute(data.streams[0].url, 'https://ashdi.vip/');
-                if (!(stream && new URL(stream).hostname === 'ashdi.vip' && media(stream))) return failure(why || (data && data.error) || 'немає потоку');
-                var id = (stream.match(/_(\d{4,10})\/hls\//) || [])[1];
-                if (!wantSubtitles || !id) return success(stream, []);
-                // A missing subtitle file must never block the episode.
-                ashdiStream('https://ashdi.vip/vod/' + id, function (ignored, subtitles) { success(stream, subtitles || []); }, function () { success(stream, []); });
-            }, function (xhr) { failure(why || (xhr && xhr.status ? 'AnimeOn: HTTP ' + xhr.status : 'AnimeOn: сервер не відповідає')); });
-        }
         animeonPlayerPage(ref.episode_id, function (page) {
-            ashdiStream(page, function (stream, subtitles) { success(stream, wantSubtitles ? subtitles || [] : []); }, aggregator);
-        }, aggregator);
+            ashdiStream(page, function (stream, subtitles) { success(stream, wantSubtitles ? subtitles || [] : []); }, failure);
+        }, failure);
     }
 
     // ---- Fourth source: Makhno = Ashdi's own catalogue, found by the card's TMDB number ----------------------------------
@@ -1316,6 +1342,10 @@
         if (filmTitle && /^(?:фільм|фильм|film|movie|відео)?$/i.test(label)) label = filmTitle;
         return {number: number, label: label, original: title};
     }
+    function cleanPlayer(on) {
+        var body = $('body')[0];
+        if (body && body.classList) body.classList.toggle('anitube-player', !!on);
+    }
 
     // Indices only: the caller's entries and progress objects are never reordered in place.
     // Numbered episodes sort numerically; specials with no number remain after them in source order.
@@ -1361,7 +1391,7 @@
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
         var ORDER = ['anitube', 'makhno', 'animeon', 'uafix', 'dorama', 'uaserials', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
-        var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null;
+        var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
         var playbackOwner = 'anitube-' + Date.now() + '-' + Math.random();
         var seasons = {}, season = 0;
         function playbackStatus(code, message) {
@@ -1461,6 +1491,7 @@
             html.append(scroll.render());
             if (Lampa.Player.listener && Lampa.Player.listener.follow) {
                 playbackListener = function (work) {
+                    cleanPlayer(work && work.anitube_owner === playbackOwner);
                     if (moonWatchStop) { moonWatchStop(); moonWatchStop = null; }
                     if (moonQualityStop) { moonQualityStop(); moonQualityStop = null; }
                     if (work && work.anitube_owner === playbackOwner && work.anitube_moon) {
@@ -1469,6 +1500,8 @@
                     }
                 };
                 Lampa.Player.listener.follow('start', playbackListener);
+                playerCloseListener = function () { cleanPlayer(false); };
+                Lampa.Player.listener.follow('destroy', playerCloseListener);
             }
             this.activity.loader(true);
             manual = saved(key).query || '';
@@ -1644,7 +1677,7 @@
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title, item.title);
                 var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'makhno' || source === 'dorama' || source === 'uaserials' ? '#s' + season : '') + ':' + (info.number || info.original));
-                return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label + (info.label === item.title ? '' : ' · ' + item.title), timeline: Lampa.Timeline.view(hash)};
+                return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label, timeline: Lampa.Timeline.view(hash)};
             });
             entries = episodeOrder(entries, false).map(function (index) { return entries[index]; });
             var displayOrder = episodeOrder(entries, descending);
@@ -1677,8 +1710,9 @@
                     }
                     node.find('.atp-ep__num').text(entry.info.number || '');
                     if (percent > 0 && percent < 90) node.find('.atp-ep__img').append('<div class="atp-ep__bar"><i style="width:' + percent + '%"></i></div>');
-                    var own = t.name && !/^\s*(серія|епізод|episode)\s*\d+\s*$/i.test(t.name);
+                    var own = t.name && normalize(t.name) !== normalize(item.title) && !/^\s*(серія|епізод|episode)\s*\d+\s*$/i.test(t.name);
                     var name = own ? entry.info.label + ' · ' + t.name : entry.info.label;
+                    entry.title = name;
                     function showQuality(height) { node.find('.atp-ep__name').text(name + (height ? ' · ' + height + 'p' : '')); }
                     showQuality(entry.quality);
                     node.find('.atp-ep__meta').text([voice.label, voice.player, voice.supported === false ? 'Плеєр не підтримується' : ''].filter(Boolean).join(' · '));
@@ -1845,9 +1879,9 @@
                 animeon: {
                     label: 'AnimeOn',
                     fetch: function (q, ok, fail) {
-                        animeonCall('/search', {sources: 'animeon', source: 'animeon', title: q, imdb_id: manual || !/^tt\d+$/.test(imdb) ? '' : imdb}, null, function (data) { ok(animeonCatalog(data)); }, fail);
+                        animeonApi('search', {q: q}, function (data) { ok(animeonCatalog(data)); }, fail);
                     },
-                    failed: function (xhr) { return 'AnimeOn: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    failed: function (xhr, why) { return 'AnimeOn: ' + (why || 'сервер не відповів') + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'AnimeOn: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
                 uafix: {
@@ -2100,9 +2134,9 @@
         // One AnimeOn season: its Ashdi voices become the voices of the screen, in the order the server lists them.
         this.openAnimeon = function () {
             var mine = openSeq;
-            animeonCall('/content', null, {source: 'animeon', ref: item.ref, full: true}, function (data) {
+            animeonLoadVoices(item.ref.id, function (data) {
                 if (closed || mine !== openSeq) return;
-                voices = animeonVoices(data, item.ref.season);
+                voices = data;
                 if (!voices.length) return self.empty('AnimeOn: для цього тайтлу немає озвучень з плеєром Ashdi.');
                 var wantedVoice = saved(key).voice;
                 voiceIndex = 0;
@@ -2111,8 +2145,8 @@
                 self.draw();
                 self.loading(false);
                 self.start(true);
-            }, function (xhr) {
-                if (!closed && mine === openSeq) self.empty('AnimeOn: не вдалося отримати список серій' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+            }, function (xhr, why) {
+                if (!closed && mine === openSeq) self.empty('AnimeOn: ' + (why || 'не вдалося отримати список серій') + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
         };
 
@@ -2184,10 +2218,6 @@
             if (entry.supported === false) return Lampa.Noty.show('AniTube: плеєр ' + entry.player + ' поки не підтримується. Обери інший плеєр угорі.');
             var mine = openSeq, playingToken = token;
             entry.loading = true;
-            playbackStatus('', 'Отримую відео · ' + entry.info.label + (entry.player ? ' · ' + entry.player : '') + '…');
-            var notice = (item && item.title) || '';
-            if (entry.info.label !== notice) notice += (notice ? ' · ' : '') + entry.info.label;
-            Lampa.Noty.show('AniTube v' + VERSION + ': ' + notice + '…');
             // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
             // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
             // the rest stays lazy for Lampa's built-in player.
@@ -2232,6 +2262,7 @@
                     playlist.push(cell);
                 });
                 if (first.anitube_moon) useMoonPlayer();
+                cleanPlayer(true);
                 Lampa.Player.play(first);
                 // The playlist lets the player's next/previous buttons switch episodes without leaving it.
                 Lampa.Player.playlist(playlist);
@@ -2278,6 +2309,8 @@
             if (moonWatchStop) moonWatchStop();
             if (moonQualityStop) moonQualityStop();
             if (playbackListener && Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('start', playbackListener);
+            if (playerCloseListener && Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('destroy', playerCloseListener);
+            cleanPlayer(false);
             try { scroll.destroy(); } catch (e) {}
             if (html) html.remove();
             html = null;
@@ -2292,6 +2325,7 @@
         // Look copied from the UAKino series page. No flex "gap": the TV's old browser ignores it, so spacing is done with margins.
         $('head').append('<style>' +
             '.atp{height:100%}.atp__body{padding:1.2em 3em 3em 4.2em}' +
+            '.anitube-player .player-panel__next-episode-name,.anitube-player .player-info__error,.anitube-player .value--stat{display:none!important}' +
             '.atp__head{margin-bottom:1em}.atp__title{font-size:2.4em;font-weight:800;line-height:1.1}.atp__meta{margin-top:.35em;opacity:.6;font-size:1.15em}' +
             '.atp__row{display:flex;flex-wrap:wrap;margin-bottom:.4em}' +
             '.atp-chip{display:flex;align-items:baseline;padding:.6em 1.2em;margin:0 .7em .7em 0;border-radius:2em;background:rgba(255,255,255,.1);font-size:1.15em;font-weight:600}' +
