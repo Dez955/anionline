@@ -1,12 +1,12 @@
-Published beta and stable: **1.8.19**. Previous stable 1.8.2 is kept as old/anitube-1.8.2.js. AnimeOn on TVs requires the updated Cloudflare Worker; see [BETA.md](BETA.md).
+Published stable: **1.8.19**; beta: **2.0.0** (following titles with a star, AniTube tab in the Lampa bell, grouped sources). Previous stable 1.8.2 is kept as old/anitube-1.8.2.js. See [BETA.md](BETA.md).
 
 # AniTube for Lampa
 
 A Lampa plugin that adds a **🟢 AniTube** action to a card. It opens a series page (voice, season and episode chips, like the UAKino plugin's) with Ukrainian voice-overs and subtitles, and plays the episode in Lampa's player with a playlist, so next/previous episode work.
 
-Stable and beta version: **1.8.19**.
+Stable version: **1.8.19**. Beta version: **2.0.0**.
 
-Beta installation and limitations: [BETA.md](BETA.md). Main `anitube.js` now equals the beta.
+Beta installation and limitations: [BETA.md](BETA.md). Main `anitube.js` stays 1.8.19 until the beta is confirmed.
 
 ## Add the plugin to Lampa
 

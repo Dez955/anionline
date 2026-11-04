@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '1.8.19';
+    var VERSION = '2.0.0';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1528,6 +1528,9 @@
         var html, scroll, body, rows = [], cur = {r: 0, c: 0};
         var results = [], item = null, voices = [], voiceIndex = 0, entries = [], closed = false, manual = '', tmdbCache = {}, token = 0;
         var isTv = !!(movie.name || movie.number_of_seasons || movie.first_air_date);
+        // The star on the card asked for this title to be followed as soon as its AniTube page is opened; used once.
+        var pendingFollow = !!object.follow;
+        object.follow = false;
         var descending = Lampa.Storage.get('anitube_episode_order', 'asc') === 'desc';
 
         function saved(key) { var all = Lampa.Storage.get('anitube_choice', '{}'); return (all && all[key]) || {}; }
@@ -1750,20 +1753,20 @@
             first.push(chip('Джерело', SOURCE_NAMES[source], false, function () {
                 Lampa.Select.show({
                     title: 'Джерело серій',
-                    items: ([
-                        {title: 'AniTube', subtitle: 'Аніме (укр)', selected: source === 'anitube', value: 'anitube'},
-                        {title: 'Makhno', subtitle: 'Аніме, Фільми, Серіали (укр)', selected: source === 'makhno', value: 'makhno'},
-                        {title: 'UAFilms', subtitle: 'Ashdi, UAflix, Moon за номером TMDB (укр)', selected: source === 'uafilms', value: 'uafilms'},
-                        {title: 'AnimeOn', subtitle: 'Аніме (укр)', selected: source === 'animeon', value: 'animeon'},
-                        {title: 'UAflix', subtitle: 'Аніме, Фільми, Серіали, Дорами (укр)', selected: source === 'uafix', value: 'uafix'},
-                        {title: 'DoramaUA', subtitle: 'Дорами (укр)', selected: source === 'dorama', value: 'dorama', box: true},
-                        {title: 'UA Serials', subtitle: 'Фільми, Серіали, Дорами, Аніме (укр)', selected: source === 'uaserials', value: 'uaserials'},
-                        {title: 'AniLibria', subtitle: 'Аніме (рос)', selected: source === 'anilibria', value: 'anilibria', ru: true}
-                    ]).filter(function (entry) { return (!entry.ru || russianEnabled()) && (!entry.box || sourceAllowed('dorama')); }),
+                    items: sourceMenu([
+                        {group: 'Аніме (укр)', title: 'AniTube', subtitle: 'Озвучення й субтитри', selected: source === 'anitube', value: 'anitube'},
+                        {group: 'Аніме (укр)', title: 'AnimeOn', subtitle: 'Озвучення', selected: source === 'animeon', value: 'animeon'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'UAFilms', subtitle: 'Ashdi, UAflix, Moon за номером TMDB', selected: source === 'uafilms', value: 'uafilms'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'UAflix', subtitle: 'Аніме, фільми, серіали, дорами', selected: source === 'uafix', value: 'uafix'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'UA Serials', subtitle: 'Фільми, серіали, дорами, аніме', selected: source === 'uaserials', value: 'uaserials'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'Makhno', subtitle: 'Аніме, фільми, серіали', selected: source === 'makhno', value: 'makhno'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'DoramaUA', subtitle: 'Дорами', selected: source === 'dorama', value: 'dorama', box: true},
+                        {group: 'Російські', title: 'AniLibria', subtitle: 'Аніме (рос)', selected: source === 'anilibria', value: 'anilibria', ru: true}
+                    ]),
                     onBack: function () { Lampa.Controller.toggle('content'); },
                     onSelect: function (picked) {
                         Lampa.Controller.toggle('content');
-                        if (picked.value !== source) self.switchSource(picked.value);
+                        if (picked.value && picked.value !== source) self.switchSource(picked.value);
                     }
                 });
             }, true));
@@ -1795,6 +1798,18 @@
                 orderButton.find('.atp-chip__l').append('<svg viewBox="0 0 36 24" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M10 20V4m-5 5 5-5 5 5" fill="none" stroke="currentColor" stroke-width="2.5" opacity="' + (descending ? '1' : '.3') + '"></path><path d="M26 4v16m-5-5 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2.5" opacity="' + (descending ? '.3' : '1') + '"></path></svg>');
                 first.push(orderButton);
             }
+            if (source === 'anitube' && item && movie.id) {
+                var following = !!followGet(movie.id), starColumn = first.length;
+                var star = chip(following ? 'Стежу' : 'Стежити', '', false, function () {
+                    if (followGet(movie.id)) followRemove(movie.id); else followAdd(movie, item);
+                    self.draw();
+                    focusAt(0, starColumn);
+                });
+                star.find('.atp-chip__l').text('').append(starSvg(following, 'atp-icon')).append($('<span></span>').text(following ? 'Стежу' : 'Стежити'));
+                first.push(star);
+            }
+            var tracked = Object.keys(followAll()).length;
+            if (tracked) first.push(chip('Стеження', String(tracked), false, function () { followList(); }));
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
@@ -2191,7 +2206,7 @@
             playbackMessage = '';
             voices = []; seasons = {}; season = 0;
             var mine = ++openSeq;
-            remember(key, {title: item.url});
+            remember(key, {title: item.url, name: item.title});
             this.loading(true);
             if (source === 'uafix') return this.openUafix();
             if (source === 'animeon') return this.openAnimeon();
@@ -2220,6 +2235,7 @@
                 voiceIndex = voices.some(function (v) { return v.label === wantedVoice && v.supported; }) ? voiceFor(wantedVoice) : -1;
                 if (voiceIndex < 0 && firstWorking) voiceIndex = voiceFor(firstWorking.label);
                 if (voiceIndex < 0) voiceIndex = 0;
+                if (pendingFollow) { pendingFollow = false; followAdd(movie, item); }
                 self.focusEpisode = !keepFocusOnSeasons;
                 self.draw();
                 self.loading(false);
@@ -2621,9 +2637,275 @@
         };
     }
 
-    function open(movie) {
+    // The source list is shown in groups, so a new source is one more line under the right heading instead of one more flat item.
+    function sourceMenu(entries) {
+        var shown = entries.filter(function (entry) { return (!entry.ru || russianEnabled()) && (!entry.box || sourceAllowed('dorama')); });
+        var menu = [], last = '';
+        shown.forEach(function (entry) {
+            if (entry.group !== last) { menu.push({title: entry.group, separator: true}); last = entry.group; }
+            menu.push(entry);
+        });
+        return menu;
+    }
+    function open(movie, options) {
         Lampa.Component.add(COMPONENT, component);
-        Lampa.Activity.push({url: '', title: 'AniTube', component: COMPONENT, movie: movie || {}, page: 1});
+        Lampa.Activity.push({url: '', title: 'AniTube', component: COMPONENT, movie: movie || {}, page: 1, follow: !!(options && options.follow)});
+    }
+
+    // ---- Following: an "AniTube" tab in Lampa's bell for new subtitle / voice-over episodes of starred titles ------------
+    // Lampa polls nothing itself (its own premieres arrive from CUB), so the plugin asks AniTube for the playlist of each followed
+    // title: once after Lampa has started, then at most every FOLLOW_EVERY per title, one title at a time with a pause between.
+    // Everything is stored on this device only: the list in Lampa's storage, the notices in the bell's own IndexedDB table.
+    var FOLLOW_STORE = 'anitube_follow', FOLLOW_EVERY = 6 * 3600 * 1000, FOLLOW_RETRY = 3600 * 1000, FOLLOW_MAX = 15, FOLLOW_GAP = 2500;
+    var FOLLOW_MODES = {any: 'Будь-що', subs: 'Субтитри', dub: 'Озвучення'};
+    var followButtons = [], followBusy = false;
+
+    function starSvg(on, cls) {
+        return '<svg' + (cls ? ' class="' + cls + '"' : '') + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">' +
+            '<path d="M12 2.6l2.8 6 6.6.8-4.9 4.5 1.3 6.5L12 17.1l-5.8 3.3 1.3-6.5-4.9-4.5 6.6-.8z" fill="' + (on ? '#4cd964' : '#9aa0a6') + '"></path></svg>';
+    }
+    function followAll() {
+        var all = Lampa.Storage.get(FOLLOW_STORE, '{}');
+        if (typeof all === 'string') { try { all = JSON.parse(all); } catch (e) { all = {}; } }
+        return all && typeof all === 'object' ? all : {};
+    }
+    // Silent: the list belongs to this device and must not be pushed to a shared account.
+    function followSave(all) { Lampa.Storage.set(FOLLOW_STORE, all, true); }
+    function followGet(id) { return id ? followAll()[String(id)] || null : null; }
+    function followMode() {
+        var mode = Lampa.Storage.get('anitube_follow_mode', 'any');
+        return FOLLOW_MODES[mode] ? mode : 'any';
+    }
+    // Enough of the TMDB card to open the screen again later: plain values only, long texts cut.
+    function followCard(movie) {
+        var card = {};
+        Object.keys(movie || {}).forEach(function (name) {
+            var value = movie[name];
+            if (typeof value === 'string') card[name] = value.length > 400 ? value.slice(0, 400) : value;
+            else if (typeof value === 'number' || typeof value === 'boolean') card[name] = value;
+        });
+        return card;
+    }
+    // Longest list of episodes per kind, over the players the plugin can play (Ashdi, Moon). Another team's list of the same
+    // length changes nothing, so a second team's subtitles for a known episode are never announced again.
+    function followSnapshot(variants) {
+        var snap = {subs: 0, dub: 0, team: {subs: '', dub: ''}};
+        (variants || []).forEach(function (variant) {
+            if (!/ashdi|moon/i.test(variant.player)) return;
+            var kind = /субтит/i.test(variant.mode) ? 'subs' : /озвуч/i.test(variant.mode) ? 'dub' : '';
+            if (!kind || variant.episodes.length <= snap[kind]) return;
+            snap[kind] = variant.episodes.length;
+            snap.team[kind] = variant.variant || '';
+        });
+        return snap;
+    }
+    function followChanges(record, snap) {
+        var seen = record.seen || {}, out = [];
+        ['subs', 'dub'].forEach(function (kind) {
+            var before = seen[kind] || 0;
+            if (snap[kind] > before && (record.mode === 'any' || record.mode === kind)) out.push({kind: kind, from: before + 1, to: snap[kind], team: snap.team[kind]});
+        });
+        return out;
+    }
+    function followNotice(record, change, time) {
+        var labels = [change.from === change.to ? 'Серія ' + change.to : 'Серії ' + change.from + '–' + change.to];
+        if (record.total && change.to >= record.total) labels.push('Остання');
+        return {
+            id: 'anitube:' + record.id + ':' + change.kind + ':' + change.to,
+            from: 'anitube',
+            time: time,
+            title: record.title,
+            text: (change.kind === 'subs' ? 'Субтитри' : 'Озвучення') + (change.team ? ' · ' + change.team : ''),
+            labels: labels,
+            poster: (record.card && record.card.poster_path) || '',
+            // No "card" field on purpose: that would make the bell open Lampa's own page instead of ours.
+            anitube_card: record.card,
+            anitube_url: record.url,
+            follow: record.id
+        };
+    }
+    // The bell gets its own tab once Lampa is ready. False on a Lampa without the notice classes.
+    function noticeReady() {
+        try {
+            if (!window.Lampa || !Lampa.Notice || !Lampa.NoticeClassLampa || !Lampa.Notice.classes) return false;
+            if (!Lampa.Notice.classes.anitube) {
+                Lampa.Notice.addClass('anitube', new Lampa.NoticeClassLampa({name: 'AniTube', db_name: 'anitube_notice'}));
+                Lampa.Notice.listener.follow('select', function (e) {
+                    if (!e || e.display !== 'anitube' || !e.element) return;
+                    var card = e.element.anitube_card;
+                    try { Lampa.Notice.close(); } catch (x) {}
+                    if (card && card.id) followOpen({card: card, url: e.element.anitube_url, title: e.element.title});
+                });
+            }
+            return true;
+        } catch (e) { return false; }
+    }
+    // Opens the screen of a followed title on the AniTube page that is followed, whatever was opened last for this card.
+    function followOpen(record) {
+        if (!record || !record.card) return;
+        if (record.url) {
+            var all = Lampa.Storage.get('anitube_choice', '{}');
+            if (!all || typeof all !== 'object') all = {};
+            var key = String(record.card.id);
+            all[key] = Object.assign(all[key] || {}, {title: record.url, name: record.title, source: 'anitube'});
+            Lampa.Storage.set('anitube_choice', all);
+        }
+        open(record.card);
+    }
+    // Resolves with true when the notice is stored (or already was); false keeps the episode "unseen" so the next check retries.
+    function followPush(element, done) {
+        if (noticeReady()) {
+            Lampa.Notice.pushNotice('anitube', element, function () { done(true); }, function (why) { done(/already/i.test(String(why))); });
+        } else {
+            try { Lampa.Noty.show('AniTube: ' + element.title + ' · ' + element.text + ' · ' + element.labels[0], {time: 8000}); } catch (e) {}
+            done(true);
+        }
+    }
+    function followCheck(id, done) {
+        var record = followAll()[id], finished = false, timer = null;
+        if (!record) return done();
+        function end(snap) {
+            if (finished) return;
+            finished = true; clearTimeout(timer);
+            var now = Date.now();
+            function save(seen) {
+                var all = followAll();
+                if (!all[id]) return done();
+                if (seen) all[id].seen = seen;
+                all[id].next = now + (seen ? FOLLOW_EVERY : FOLLOW_RETRY);
+                if (seen) all[id].checked = now;
+                followSave(all);
+                followChanged();
+                done();
+            }
+            if (!snap) return save(null);
+            // The first check only learns what is there already.
+            var changes = record.seen ? followChanges(record, snap) : [];
+            var seen = {subs: (record.seen && record.seen.subs) || 0, dub: (record.seen && record.seen.dub) || 0};
+            ['subs', 'dub'].forEach(function (kind) {
+                if (!changes.some(function (change) { return change.kind === kind; })) seen[kind] = Math.max(seen[kind], snap[kind]);
+            });
+            if (!changes.length) return save(seen);
+            var left = changes.length;
+            changes.forEach(function (change) {
+                followPush(followNotice(record, change, now), function (ok) {
+                    if (ok) seen[change.kind] = Math.max(seen[change.kind], change.to);
+                    if (--left === 0) save(seen);
+                });
+            });
+        }
+        timer = setTimeout(function () { end(null); }, 45000);
+        fetchPlaylist(record.url, function (data) {
+            if (!data || !data.success || !data.response) return end(null);
+            var variants;
+            try { variants = sources(data.response, record.url); } catch (e) { return end(null); }
+            end(variants.length ? followSnapshot(variants) : null);
+        }, function () { end(null); });
+    }
+    function followRun() {
+        if (followBusy || !window.Lampa) return;
+        noticeReady();
+        var all = followAll(), now = Date.now();
+        var due = Object.keys(all).filter(function (id) { return !all[id].next || all[id].next <= now; }).slice(0, FOLLOW_MAX);
+        if (!due.length) return;
+        followBusy = true;
+        (function step(i) {
+            if (i >= due.length) { followBusy = false; return; }
+            followCheck(due[i], function () { setTimeout(function () { step(i + 1); }, FOLLOW_GAP); });
+        })(0);
+    }
+    function followStart() {
+        function go() {
+            setTimeout(followRun, 8000);
+            setInterval(followRun, 30 * 60 * 1000);
+        }
+        if (window.appready) go();
+        else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') go(); });
+    }
+    function followPaint(button, movie) {
+        var on = !!followGet(movie.id);
+        button.toggleClass('anitube-follow--on', on);
+        button.html(starSvg(on, '') + '<span>' + (on ? 'Стежу' : 'Стежити') + '</span>');
+    }
+    function followChanged() {
+        followButtons.forEach(function (pair) { try { followPaint(pair[0], pair[1]); } catch (e) {} });
+    }
+    function followAdd(movie, item) {
+        if (!movie || !movie.id || !item || !item.url) return;
+        var all = followAll(), id = String(movie.id);
+        var total = +((String(item.note || '').match(/(\d+)\s*з\s*(\d+)/) || [])[2] || 0);
+        var record = all[id] || {mode: followMode(), added: Date.now()};
+        // Another season's page restarts the count: its episodes are new, but nothing is announced for the first look.
+        if (record.url && record.url !== item.url) delete record.seen;
+        all[id] = Object.assign(record, {id: id, url: item.url, title: item.title, total: total, card: followCard(movie), next: 0});
+        followSave(all);
+        followChanged();
+        Lampa.Noty.show('AniTube: стежу за «' + item.title + '»');
+        setTimeout(followRun, 1500);
+    }
+    function followRemove(id) {
+        var all = followAll();
+        if (!all[String(id)]) return;
+        delete all[String(id)];
+        followSave(all);
+        followChanged();
+        Lampa.Noty.show('AniTube: більше не стежу');
+    }
+    // The star on Lampa's own card page: unfollow, follow the title opened before, or open the screen which follows it once found.
+    function followToggleCard(movie) {
+        if (followGet(movie.id)) return followRemove(movie.id);
+        var all = Lampa.Storage.get('anitube_choice', '{}'), choice = (all && all[String(movie.id)]) || {};
+        if ((!choice.source || choice.source === 'anitube') && /^https:\/\/anitube\.in\.ua\//.test(choice.title || '')) {
+            followAdd(movie, {url: choice.title, title: choice.name || movie.title || movie.name || 'AniTube', note: ''});
+        } else open(movie, {follow: true});
+    }
+    function followCounts(record) {
+        var seen = record.seen || {};
+        return 'Субтитри: ' + (seen.subs || 0) + ' · Озвучення: ' + (seen.dub || 0) + (record.total ? ' · всього ' + record.total : '');
+    }
+    function followList() {
+        var all = followAll(), ids = Object.keys(all), back = Lampa.Controller.enabled().name;
+        if (!ids.length) return Lampa.Noty.show('AniTube: список стеження порожній. Натисни зірочку на картці аніме.');
+        Lampa.Select.show({
+            title: 'Мої стеження (' + ids.length + ')',
+            items: ids.map(function (id) { return {title: all[id].title, subtitle: FOLLOW_MODES[all[id].mode] + ' · ' + followCounts(all[id]), id: id}; }),
+            onBack: function () { Lampa.Controller.toggle(back); },
+            onSelect: function (picked) { Lampa.Controller.toggle(back); followMenu(picked.id, back); }
+        });
+    }
+    function followMenu(id, back) {
+        var record = followGet(id);
+        if (!record) return;
+        Lampa.Select.show({
+            title: record.title,
+            items: [
+                {title: 'Відкрити в AniTube', act: 'open'},
+                {title: 'Що чекати: ' + FOLLOW_MODES[record.mode], subtitle: 'Змінити: будь-що, субтитри чи озвучення', act: 'mode'},
+                {title: 'Прибрати зі стеження', act: 'remove'}
+            ],
+            onBack: function () { Lampa.Controller.toggle(back); followList(); },
+            onSelect: function (picked) {
+                Lampa.Controller.toggle(back);
+                if (picked.act === 'open') followOpen(record);
+                else if (picked.act === 'remove') followRemove(id);
+                else followModeMenu(id, back);
+            }
+        });
+    }
+    function followModeMenu(id, back) {
+        var record = followGet(id);
+        if (!record) return;
+        Lampa.Select.show({
+            title: 'Що чекати · ' + record.title,
+            items: Object.keys(FOLLOW_MODES).map(function (mode) { return {title: FOLLOW_MODES[mode], selected: record.mode === mode, mode: mode}; }),
+            onBack: function () { Lampa.Controller.toggle(back); followMenu(id, back); },
+            onSelect: function (picked) {
+                Lampa.Controller.toggle(back);
+                var all = followAll();
+                if (all[id]) { all[id].mode = picked.mode; followSave(all); }
+                followMenu(id, back);
+            }
+        });
     }
     function addTemplates() {
         // Look copied from the UAKino series page. No flex "gap": the TV's old browser ignores it, so spacing is done with margins.
@@ -2636,6 +2918,7 @@
             '.atp-chip--sort svg{display:block;width:2em;height:1.3em}.atp-chip--sort .atp-chip__v{display:none}' +
             '.atp-chip__v{margin-left:.55em;opacity:.65;font-weight:500}' +
             '.atp-icon{display:inline-block;width:.85em;height:.85em;vertical-align:middle}.atp-chip__v .atp-icon{margin-left:.45em}.atp-ep__st .atp-icon{margin-right:.4em}' +
+            '.atp-chip__l .atp-icon{width:1em;height:1em;margin-right:.45em}' +
             '.atp-chip--on{background:#1F6FEB;color:#fff}.atp-chip--on .atp-chip__v{opacity:.85}' +
             '.atp-chip.focus{background:#fff;color:#0b0d12}.atp-chip.focus .atp-chip__v{opacity:.7}' +
             '.atp-playback-status{padding:.5em 0;font-size:1.1em;color:#f0cd8c}.atp-playback-status:empty{display:none}' +
@@ -2675,6 +2958,17 @@
                 component: 'anitube',
                 param: {name: 'anitube_auto_quality', type: 'trigger', 'default': true},
                 field: {name: 'Знижувати якість Moon при поганому зв\'язку', description: 'Увімкнено: якщо відео зависає, якість падає на один крок. Вимкнено: завжди максимальна якість. Лише для Moon на ТВ.'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_follow_mode', type: 'select', values: FOLLOW_MODES, 'default': 'any'},
+                field: {name: 'Стеження: що чекати', description: 'Для нових зірочок: будь-що, лише субтитри або лише озвучення. Для вже доданих режим міняється в списку «Мої стеження».'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_follow_list', type: 'button'},
+                field: {name: 'Мої стеження', description: 'Аніме із зірочкою: скільки серій субтитрів і озвучення вже було, змінити режим або прибрати.'},
+                onChange: function () { followList(); }
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
@@ -2724,6 +3018,15 @@
             var buttons = root.find('.full-start-new__buttons, .full-start__buttons').first();
             if (buttons.length) buttons.append(button);
         }
+        // The star next to it: grey when the title is not followed, green when it is.
+        if (movie.id && button.parent().length) {
+            var star = $('<div class="full-start__button selector view--anitube-follow anitube-follow-button"></div>');
+            followPaint(star, movie);
+            followButtons.push([star, movie]);
+            if (followButtons.length > 30) followButtons.shift();
+            star.on('hover:enter', function () { followToggleCard(movie); });
+            button.after(star);
+        }
     }
     function start() {
         if (window.plugin_anitube_prototype_ready) return;
@@ -2731,6 +3034,7 @@
         restoreMoonPlayer();
         addTemplates();
         addSettings();
+        followStart();
         // Registered up front so Lampa can restore the screen after a restart.
         Lampa.Component.add(COMPONENT, component);
         Lampa.Listener.follow('full', function (event) {
