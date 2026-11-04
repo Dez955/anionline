@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.0';
+    var VERSION = '2.0.1';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -349,7 +349,7 @@
     }
     function autoQualityEnabled() {
         var value = Lampa.Storage.field('anitube_auto_quality');
-        return value !== false && value !== 'false';
+        return value === true || value === 'true';
     }
     // Moon starts at its highest quality. With the setting on, repeated or long stalls lower it one step.
     function watchMoonQuality() {
@@ -1541,6 +1541,19 @@
             if (picked < 0) picked = preferredVoice(voices, label);
             return picked < 0 ? voices.findIndex(function (v) { return v.label === label; }) : picked;
         }
+        // A hand-typed name belongs to one source: a romaji name typed for AniLibria must not become UAFilms' or AniTube's query.
+        function manualFor(name) {
+            var queries = saved(key).queries;
+            return (queries && typeof queries === 'object' && queries[name]) || '';
+        }
+        // Before 2.0.1 one name was kept per card; it stays with the source that was remembered then.
+        function migrateQuery() {
+            var choice = saved(key);
+            if (!choice.query || (choice.queries && typeof choice.queries === 'object')) return;
+            var queries = {};
+            queries[choice.source || 'anitube'] = choice.query;
+            remember(key, {queries: queries, query: ''});
+        }
         function remember(key, value) {
             var all = Lampa.Storage.get('anitube_choice', '{}');
             if (!all || typeof all !== 'object') all = {};
@@ -1673,7 +1686,8 @@
                 Lampa.Player.listener.follow('destroy', playerCloseListener);
             }
             this.activity.loader(true);
-            manual = saved(key).query || '';
+            migrateQuery();
+            manual = manualFor(source);
             // Other names of the card from two places at once (TMDB translations, AniList for a Japanese-only card), then the search starts.
             var gathered = [], waiting = 2;
             function got(index, list) {
@@ -1994,7 +2008,9 @@
                 if (!value) Lampa.Noty.show('Ручну назву скинуто, шукаю за назвами картки');
                 // AniTube often names a show differently from the card, so the title can be typed by hand (and is remembered).
                 manual = value;
-                remember(key, {query: manual, title: ''});
+                var queries = Object.assign({}, saved(key).queries || {});
+                if (manual) queries[source] = manual; else delete queries[source];
+                remember(key, {queries: queries, query: '', title: ''});
                 results = []; item = null; voices = [];
                 self.loading(true);
                 self.search(0);
@@ -2127,6 +2143,7 @@
             while (next && !sourceAllowed(next)) next = ORDER[ORDER.indexOf(next) + 1];
             if (manual || fellBack || !next) return false;
             source = next;
+            manual = manualFor(next);
             return true;
         };
 
@@ -2158,6 +2175,7 @@
             playSeq++; launching = false;
             source = name;
             fellBack = true;
+            manual = manualFor(name);
             remember(key, {source: name, title: ''});
             results = []; item = null; voices = []; seasons = {}; season = 0;
             this.loading(true);
@@ -2762,7 +2780,7 @@
         }
     }
     function followCheck(id, done) {
-        var record = followAll()[id], finished = false, timer = null;
+        var record = followAll()[id], finished = false, timer = null, latest = null;
         if (!record) return done();
         function end(snap) {
             if (finished) return;
@@ -2772,6 +2790,7 @@
                 var all = followAll();
                 if (!all[id]) return done();
                 if (seen) all[id].seen = seen;
+                if (latest) all[id].lastNew = latest;
                 all[id].next = now + (seen ? FOLLOW_EVERY : FOLLOW_RETRY);
                 if (seen) all[id].checked = now;
                 followSave(all);
@@ -2790,6 +2809,7 @@
             changes.forEach(function (change) {
                 followPush(followNotice(record, change, now), function (ok) {
                     if (ok) seen[change.kind] = Math.max(seen[change.kind], change.to);
+                    if (ok) latest = {kind: change.kind, to: change.to, team: change.team, time: now};
                     if (--left === 0) save(seen);
                 });
             });
@@ -2814,8 +2834,63 @@
             followCheck(due[i], function () { setTimeout(function () { step(i + 1); }, FOLLOW_GAP); });
         })(0);
     }
+    // The star in Lampa's header next to the bell: the followed titles with posters, newest episode first, like the bell's list.
+    var followHeadIcon = null;
+    function followHead() {
+        try {
+            if (followHeadIcon || !Lampa.Head || !Lampa.Head.addIcon) return;
+            followHeadIcon = Lampa.Head.addIcon(starSvg(true, '').replace('fill="#4cd964"', 'fill="currentColor"'), followPanel);
+            followHeadIcon.addClass('anitube-follow-head');
+        } catch (e) {}
+    }
+    function followWhen(record) {
+        var last = record.lastNew;
+        if (last) return (last.kind === 'subs' ? 'Субтитри' : 'Озвучення') + (last.team ? ' · ' + last.team : '') + ' · серія ' + last.to;
+        var seen = record.seen;
+        if (!seen) return 'Ще не перевірено';
+        return 'Субтитри: ' + (seen.subs || 0) + ' · Озвучення: ' + (seen.dub || 0) + (record.total ? ' з ' + record.total : '');
+    }
+    function followTime(value) {
+        try { return value ? Lampa.Utils.parseTime(value).short : ''; } catch (e) { return ''; }
+    }
+    function followPanel() {
+        var all = followAll(), ids = Object.keys(all);
+        if (!Lampa.Modal || !Lampa.Template) return followList();
+        var html = $('<div></div>');
+        ids.sort(function (a, b) {
+            var x = (all[a].lastNew && all[a].lastNew.time) || all[a].added || 0, y = (all[b].lastNew && all[b].lastNew.time) || all[b].added || 0;
+            return y - x;
+        });
+        function close() {
+            Lampa.Modal.close();
+            Lampa.Controller.toggle('head');
+        }
+        ids.forEach(function (id) {
+            var record = all[id], item = Lampa.Template.get('notice_card', {});
+            var poster = record.card && record.card.poster_path;
+            item.addClass(poster ? 'image--poster' : 'image--none');
+            item.find('.notice__title').text(record.title || '');
+            item.find('.notice__time').text(followTime((record.lastNew && record.lastNew.time) || record.checked));
+            item.find('.notice__descr').text(FOLLOW_MODES[record.mode] + ' · ' + followWhen(record));
+            if (poster) {
+                var img = item.find('.notice__img img')[0];
+                if (img) {
+                    img.onload = function () { item.addClass('image--loaded'); };
+                    img.onerror = function () { img.src = './img/img_broken.svg'; };
+                    img.src = /^https?:/.test(poster) ? poster : Lampa.TMDB.image('t/p/w300' + (poster.charAt(0) === '/' ? '' : '/') + poster);
+                }
+            }
+            item.on('hover:enter', function () { close(); followOpen(record); });
+            // Holding OK opens the same menu as the settings list: mode, open, remove.
+            item.on('hover:long', function () { close(); followMenu(id, 'head'); });
+            html.append(item);
+        });
+        if (!ids.length) html.append($('<div class="about"></div>').text('Тут будуть аніме із зірочкою. Натисни зірочку на картці аніме, щоб стежити за новими серіями.'));
+        Lampa.Modal.open({title: 'Мої стеження' + (ids.length ? ' (' + ids.length + ')' : ''), html: html, size: 'medium', onBack: close});
+    }
     function followStart() {
         function go() {
+            followHead();
             setTimeout(followRun, 8000);
             setInterval(followRun, 30 * 60 * 1000);
         }
@@ -2956,8 +3031,8 @@
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
-                param: {name: 'anitube_auto_quality', type: 'trigger', 'default': true},
-                field: {name: 'Знижувати якість Moon при поганому зв\'язку', description: 'Увімкнено: якщо відео зависає, якість падає на один крок. Вимкнено: завжди максимальна якість. Лише для Moon на ТВ.'}
+                param: {name: 'anitube_auto_quality', type: 'trigger', 'default': false},
+                field: {name: 'Знижувати якість Moon при поганому зв\'язку', description: 'Типово вимкнено: завжди максимальна якість. Увімкнено: якщо відео зависає, якість падає на один крок. Лише для Moon на ТВ.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
@@ -3019,13 +3094,19 @@
             if (buttons.length) buttons.append(button);
         }
         // The star next to it: grey when the title is not followed, green when it is.
-        if (movie.id && button.parent().length) {
-            var star = $('<div class="full-start__button selector view--anitube-follow anitube-follow-button"></div>');
+        if (movie.id) {
+            var star = $('<div class="full-start__button selector anitube-follow-button"></div>');
             followPaint(star, movie);
             followButtons.push([star, movie]);
             if (followButtons.length > 30) followButtons.shift();
             star.on('hover:enter', function () { followToggleCard(movie); });
-            button.after(star);
+            // The new card gathers buttons of its hidden container into the "Watch" menu; the star belongs in the visible
+            // row of round buttons, before "⋯". The old card has one row, so it simply follows the AniTube button.
+            var row = root.find('.full-start-new__buttons').first();
+            if (row.length) {
+                var more = row.children('.button--options').first();
+                if (more.length) more.before(star); else row.append(star);
+            } else button.after(star);
         }
     }
     function start() {
