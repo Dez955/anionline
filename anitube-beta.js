@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.1';
+    var VERSION = '2.0.4';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -2674,9 +2674,11 @@
     // Lampa polls nothing itself (its own premieres arrive from CUB), so the plugin asks AniTube for the playlist of each followed
     // title: once after Lampa has started, then at most every FOLLOW_EVERY per title, one title at a time with a pause between.
     // Everything is stored on this device only: the list in Lampa's storage, the notices in the bell's own IndexedDB table.
-    var FOLLOW_STORE = 'anitube_follow', FOLLOW_EVERY = 6 * 3600 * 1000, FOLLOW_RETRY = 3600 * 1000, FOLLOW_MAX = 15, FOLLOW_GAP = 2500;
+    var FOLLOW_STORE = 'anitube_follow', FOLLOW_EVERY = 20 * 60 * 1000, FOLLOW_RETRY = 30 * 60 * 1000, FOLLOW_MAX = 15, FOLLOW_GAP = 2500;
+    // A star on a title that AniTube does not have (yet) stays in the list; the title is looked for again every FOLLOW_FIND, for FOLLOW_GIVE_UP.
+    var FOLLOW_FIND = 6 * 3600 * 1000, FOLLOW_GIVE_UP = 30 * 24 * 3600 * 1000, FOLLOW_TICK = 5 * 60 * 1000;
     var FOLLOW_MODES = {any: 'Будь-що', subs: 'Субтитри', dub: 'Озвучення'};
-    var followButtons = [], followBusy = false;
+    var followButtons = [], followBusy = false, followLooking = {};
 
     function starSvg(on, cls) {
         return '<svg' + (cls ? ' class="' + cls + '"' : '') + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">' +
@@ -2770,6 +2772,27 @@
         }
         open(record.card);
     }
+    // From the followed list: Lampa's own page of the title (the one with "Watch", bookmarks, reactions). The AniTube page that is followed is
+    // remembered, so "Watch -> AniTube" from there opens that page; the source is then chosen by hand.
+    function followOpenCard(record) {
+        if (!record || !record.card) return;
+        if (record.url) {
+            var all = Lampa.Storage.get('anitube_choice', '{}');
+            if (!all || typeof all !== 'object') all = {};
+            var key = String(record.card.id);
+            all[key] = Object.assign(all[key] || {}, {title: record.url, name: record.title, source: 'anitube'});
+            Lampa.Storage.set('anitube_choice', all);
+        }
+        var card = record.card;
+        Lampa.Activity.push({
+            url: '',
+            component: 'full',
+            id: card.id,
+            method: card.number_of_seasons || card.seasons || card.name || card.first_air_date ? 'tv' : 'movie',
+            card: card,
+            source: card.source || 'tmdb'
+        });
+    }
     // Resolves with true when the notice is stored (or already was); false keeps the episode "unseen" so the next check retries.
     function followPush(element, done) {
         if (noticeReady()) {
@@ -2779,9 +2802,30 @@
             done(true);
         }
     }
+    // A followed title without an AniTube page: look it up (the same way as for a new star); the next run reads its playlist.
+    function followFind(id, done) {
+        var record = followAll()[id];
+        if (!record) return done();
+        followResolve(record.card || {}, function (found) {
+            var all = followAll(), rec = all[id], now = Date.now();
+            if (!rec) return done();
+            if (found.pick) {
+                rec.url = found.pick.url; rec.title = found.pick.title;
+                rec.total = +((String(found.pick.note || '').match(/(\d+)\s*з\s*(\d+)/) || [])[2] || 0);
+                rec.next = 0; delete rec.gaveUp;
+            } else {
+                rec.next = now + (found.failed ? FOLLOW_RETRY : FOLLOW_FIND);
+                if (!found.failed && now - (rec.searchFrom || rec.added || now) > FOLLOW_GIVE_UP) rec.gaveUp = true;
+            }
+            followSave(all);
+            followChanged();
+            done();
+        });
+    }
     function followCheck(id, done) {
         var record = followAll()[id], finished = false, timer = null, latest = null;
         if (!record) return done();
+        if (!record.url) return followFind(id, done);
         function end(snap) {
             if (finished) return;
             finished = true; clearTimeout(timer);
@@ -2789,7 +2833,17 @@
             function save(seen) {
                 var all = followAll();
                 if (!all[id]) return done();
-                if (seen) all[id].seen = seen;
+                if (seen) {
+                    // The date shown in the list is when an episode first became available to the plugin: the time of the check that saw the count grow.
+                    // The first look only learns what is there and dates nothing.
+                    var before = all[id].seen;
+                    if (before) {
+                        var when = Object.assign({}, all[id].when || {});
+                        ['subs', 'dub'].forEach(function (kind) { if ((seen[kind] || 0) > (before[kind] || 0)) when[kind] = now; });
+                        all[id].when = when;
+                    }
+                    all[id].seen = seen;
+                }
                 if (latest) all[id].lastNew = latest;
                 all[id].next = now + (seen ? FOLLOW_EVERY : FOLLOW_RETRY);
                 if (seen) all[id].checked = now;
@@ -2826,7 +2880,7 @@
         if (followBusy || !window.Lampa) return;
         noticeReady();
         var all = followAll(), now = Date.now();
-        var due = Object.keys(all).filter(function (id) { return !all[id].next || all[id].next <= now; }).slice(0, FOLLOW_MAX);
+        var due = Object.keys(all).filter(function (id) { return !all[id].gaveUp && (!all[id].next || all[id].next <= now); }).slice(0, FOLLOW_MAX);
         if (!due.length) return;
         followBusy = true;
         (function step(i) {
@@ -2844,11 +2898,16 @@
         } catch (e) {}
     }
     function followWhen(record) {
+        if (!record.url) return '';
         var last = record.lastNew;
         if (last) return (last.kind === 'subs' ? 'Субтитри' : 'Озвучення') + (last.team ? ' · ' + last.team : '') + ' · серія ' + last.to;
         var seen = record.seen;
         if (!seen) return 'Ще не перевірено';
         return 'Субтитри: ' + (seen.subs || 0) + ' · Озвучення: ' + (seen.dub || 0) + (record.total ? ' з ' + record.total : '');
+    }
+    function followLatest(record) {
+        var when = record.when || {};
+        return Math.max(when.subs || 0, when.dub || 0, (record.lastNew && record.lastNew.time) || 0);
     }
     function followTime(value) {
         try { return value ? Lampa.Utils.parseTime(value).short : ''; } catch (e) { return ''; }
@@ -2858,8 +2917,7 @@
         if (!Lampa.Modal || !Lampa.Template) return followList();
         var html = $('<div></div>');
         ids.sort(function (a, b) {
-            var x = (all[a].lastNew && all[a].lastNew.time) || all[a].added || 0, y = (all[b].lastNew && all[b].lastNew.time) || all[b].added || 0;
-            return y - x;
+            return (followLatest(all[b]) || all[b].added || 0) - (followLatest(all[a]) || all[a].added || 0);
         });
         function close() {
             Lampa.Modal.close();
@@ -2870,8 +2928,8 @@
             var poster = record.card && record.card.poster_path;
             item.addClass(poster ? 'image--poster' : 'image--none');
             item.find('.notice__title').text(record.title || '');
-            item.find('.notice__time').text(followTime((record.lastNew && record.lastNew.time) || record.checked));
-            item.find('.notice__descr').text(FOLLOW_MODES[record.mode] + ' · ' + followWhen(record));
+            item.find('.notice__time').text(followTime(followLatest(record)));
+            item.find('.notice__descr').text(followWhen(record));
             if (poster) {
                 var img = item.find('.notice__img img')[0];
                 if (img) {
@@ -2880,7 +2938,7 @@
                     img.src = /^https?:/.test(poster) ? poster : Lampa.TMDB.image('t/p/w300' + (poster.charAt(0) === '/' ? '' : '/') + poster);
                 }
             }
-            item.on('hover:enter', function () { close(); followOpen(record); });
+            item.on('hover:enter', function () { close(); followOpenCard(record); });
             // Holding OK opens the same menu as the settings list: mode, open, remove.
             item.on('hover:long', function () { close(); followMenu(id, 'head'); });
             html.append(item);
@@ -2892,7 +2950,7 @@
         function go() {
             followHead();
             setTimeout(followRun, 8000);
-            setInterval(followRun, 30 * 60 * 1000);
+            setInterval(followRun, FOLLOW_TICK);
         }
         if (window.appready) go();
         else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') go(); });
@@ -2905,11 +2963,23 @@
     function followChanged() {
         followButtons.forEach(function (pair) { try { followPaint(pair[0], pair[1]); } catch (e) {} });
     }
+    // item = the AniTube page; without it the title is only listed, and the plugin keeps looking for it on AniTube.
     function followAdd(movie, item) {
-        if (!movie || !movie.id || !item || !item.url) return;
+        if (!movie || !movie.id) return;
         var all = followAll(), id = String(movie.id);
+        if (!item || !item.url) {
+            if (all[id]) return;
+            var own = movie.title || movie.name || movie.original_title || movie.original_name || 'AniTube';
+            all[id] = {id: id, url: '', title: own, mode: followMode(), added: Date.now(), total: 0, card: followCard(movie), next: 0};
+            followSave(all);
+            followChanged();
+            Lampa.Noty.show('AniTube: стежу за «' + own + '»');
+            setTimeout(followRun, 1500);
+            return;
+        }
         var total = +((String(item.note || '').match(/(\d+)\s*з\s*(\d+)/) || [])[2] || 0);
         var record = all[id] || {mode: followMode(), added: Date.now()};
+        delete record.gaveUp;
         // Another season's page restarts the count: its episodes are new, but nothing is announced for the first look.
         if (record.url && record.url !== item.url) delete record.seen;
         all[id] = Object.assign(record, {id: id, url: item.url, title: item.title, total: total, card: followCard(movie), next: 0});
@@ -2931,10 +3001,72 @@
         if (followGet(movie.id)) return followRemove(movie.id);
         var all = Lampa.Storage.get('anitube_choice', '{}'), choice = (all && all[String(movie.id)]) || {};
         if ((!choice.source || choice.source === 'anitube') && /^https:\/\/anitube\.in\.ua\//.test(choice.title || '')) {
-            followAdd(movie, {url: choice.title, title: choice.name || movie.title || movie.name || 'AniTube', note: ''});
-        } else open(movie, {follow: true});
+            return followAdd(movie, {url: choice.title, title: choice.name || movie.title || movie.name || 'AniTube', note: ''});
+        }
+        // Not opened before: the title is looked up on AniTube in the background and added; the screen is never opened for it.
+        // A series AniTube does not have (or the site not answering) still goes into the list, and the plugin looks for it again later.
+        if (followLooking[movie.id]) return;
+        followLooking[movie.id] = true;
+        Lampa.Noty.show('AniTube: додаю до списку…');
+        followResolve(movie, function (found) {
+            delete followLooking[movie.id];
+            if (found.pick) return followAdd(movie, found.pick);
+            if (!found.candidates.length) return followAdd(movie, null);
+            var back = Lampa.Controller.enabled().name;
+            var items = found.candidates.map(function (r, index) { return {title: r.title, subtitle: r.note || '', index: index}; });
+            items.push({title: 'Жоден з цих', subtitle: 'Додати до списку без прив\'язки до AniTube', index: -1});
+            Lampa.Select.show({
+                title: 'Який це тайтл на AniTube?',
+                items: items,
+                onBack: function () { Lampa.Controller.toggle(back); },
+                onSelect: function (picked) { Lampa.Controller.toggle(back); followAdd(movie, picked.index >= 0 ? found.candidates[picked.index] : null); }
+            });
+        });
+    }
+    // The title of a card on AniTube without the screen: the same names (card, TMDB translations, AniList) and the same ranking as the search.
+    // {pick} when one result is clearly the show, {candidates} (best first) when it has to be chosen, {failed} when AniTube did not answer.
+    function followResolve(movie, done) {
+        var extra = [], waiting = 2;
+        function got(list) { extra = extra.concat(list || []); if (--waiting === 0) go(); }
+        tmdbTitles(movie, got);
+        anilistTitles(movie, got);
+        function go() {
+            extra = unique(extra);
+            var tiers = nameTiers(movie, extra), names = [];
+            for (var i = 0; i < 4; i++) [tiers[0], tiers[1]].forEach(function (tier) { if (tier && tier[i] && names.length < 5) names.push(tier[i]); });
+            if (names.length < 2 && tiers[2] && tiers[2][0]) names.push(tiers[2][0]);
+            if (!names.length) return done({candidates: []});
+            var cards = fullNames(movie, extra).map(nameWords).filter(function (c) { return c.length; });
+            var year = parseInt(String(movie.release_date || movie.first_air_date || '').slice(0, 4), 10) || 0;
+            var shown = [movie.title, movie.name].filter(function (n) { return n && !/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(n); })[0] || extra[0] || names[0];
+            var pending = names.length, seen = {}, list = [], failures = 0;
+            function finish() {
+                if (!list.length) return done(failures === names.length ? {failed: true, candidates: []} : {candidates: []});
+                list.forEach(function (r) {
+                    var parts = String(r.title || '').split(/\s+\/\s+/).map(function (part) { return part.trim(); }).filter(Boolean);
+                    if (parts.length < 2) return;
+                    r.names = unique((r.names || []).concat(parts));
+                    r.title = shortName(pickName(parts, shown));
+                });
+                var scored = list.map(function (r) { return {r: r, score: titleScore(r.names || [r.title], cards)}; });
+                scored.sort(function (x, y) {
+                    return (y.score - x.score) || (Math.abs((parseInt(x.r.year, 10) || 0) - year) - Math.abs((parseInt(y.r.year, 10) || 0) - year));
+                });
+                var top = scored[0].score, next = scored[1] ? scored[1].score : 0;
+                if (list.length === 1 || (top >= 11 && next < top * 0.7)) return done({pick: scored[0].r, candidates: []});
+                var related = scored.filter(function (e) { return e.score > 0; }).slice(0, 8).map(function (e) { return e.r; });
+                done({candidates: related});
+            }
+            names.forEach(function (query) {
+                fetchText('search', query, function (html) {
+                    catalog(html).forEach(function (r) { if (!seen[r.url]) { seen[r.url] = true; list.push(r); } });
+                    if (--pending === 0) finish();
+                }, function () { failures++; if (--pending === 0) finish(); });
+            });
+        }
     }
     function followCounts(record) {
+        if (!record.url) return '';
         var seen = record.seen || {};
         return 'Субтитри: ' + (seen.subs || 0) + ' · Озвучення: ' + (seen.dub || 0) + (record.total ? ' · всього ' + record.total : '');
     }
@@ -2943,7 +3075,7 @@
         if (!ids.length) return Lampa.Noty.show('AniTube: список стеження порожній. Натисни зірочку на картці аніме.');
         Lampa.Select.show({
             title: 'Мої стеження (' + ids.length + ')',
-            items: ids.map(function (id) { return {title: all[id].title, subtitle: FOLLOW_MODES[all[id].mode] + ' · ' + followCounts(all[id]), id: id}; }),
+            items: ids.map(function (id) { return {title: all[id].title, subtitle: followCounts(all[id]), id: id}; }),
             onBack: function () { Lampa.Controller.toggle(back); },
             onSelect: function (picked) { Lampa.Controller.toggle(back); followMenu(picked.id, back); }
         });
@@ -2954,14 +3086,18 @@
         Lampa.Select.show({
             title: record.title,
             items: [
-                {title: 'Відкрити в AniTube', act: 'open'},
+                {title: 'Відкрити сторінку', act: 'open'},
+                record.url ? null : {title: 'Шукати на AniTube знову', subtitle: 'Спробувати знайти тайтл просто зараз', act: 'find'},
                 {title: 'Що чекати: ' + FOLLOW_MODES[record.mode], subtitle: 'Змінити: будь-що, субтитри чи озвучення', act: 'mode'},
                 {title: 'Прибрати зі стеження', act: 'remove'}
-            ],
+            ].filter(Boolean),
             onBack: function () { Lampa.Controller.toggle(back); followList(); },
             onSelect: function (picked) {
                 Lampa.Controller.toggle(back);
-                if (picked.act === 'open') followOpen(record);
+                if (picked.act === 'find') {
+                    var all = followAll();
+                    if (all[id]) { delete all[id].gaveUp; all[id].searchFrom = Date.now(); all[id].next = 0; followSave(all); followChanged(); setTimeout(followRun, 500); }
+                } else if (picked.act === 'open') followOpenCard(record);
                 else if (picked.act === 'remove') followRemove(id);
                 else followModeMenu(id, back);
             }
@@ -3037,7 +3173,7 @@
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_follow_mode', type: 'select', values: FOLLOW_MODES, 'default': 'any'},
-                field: {name: 'Стеження: що чекати', description: 'Для нових зірочок: будь-що, лише субтитри або лише озвучення. Для вже доданих режим міняється в списку «Мої стеження».'}
+                field: {name: 'Стеження: типово для нових зірочок', description: 'Що чекати від аніме, яке ти щойно додав зірочкою: будь-що, лише субтитри чи лише озвучення. Для кожного аніме окремо: «Мої стеження» → довге ОК на тайтлі → «Що чекати».'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
