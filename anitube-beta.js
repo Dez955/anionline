@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.4';
+    var VERSION = '2.0.5';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -2997,8 +2997,24 @@
         Lampa.Noty.show('AniTube: більше не стежу');
     }
     // The star on Lampa's own card page: unfollow, follow the title opened before, or open the screen which follows it once found.
+    // False only when the card clearly is not anime: TMDB genres without Animation (16), or Animation from outside Japan, China and Korea
+    // (Western cartoons). A card without genres or without a language is given the benefit of the doubt.
+    function looksLikeAnime(movie) {
+        var genres = (movie.genres || []).map(function (g) { return g && typeof g === 'object' ? g.id : g; }).concat(movie.genre_ids || []);
+        if (!genres.length) return true;
+        if (genres.map(Number).indexOf(16) < 0) return false;
+        var lang = String(movie.original_language || '').toLowerCase();
+        var countries = [].concat(movie.origin_country || []).concat((movie.production_countries || []).map(function (c) { return c && c.iso_3166_1; }));
+        if (/^(ja|zh|cn|ko)$/.test(lang) || countries.some(function (c) { return /^(JP|CN|KR|TW|HK)$/.test(String(c || '')); })) return true;
+        return !lang;
+    }
     function followToggleCard(movie) {
         if (followGet(movie.id)) return followRemove(movie.id);
+        // The AniTube list is for anime only; series have Lampa's own bell on the card, films have nothing to follow.
+        if (!looksLikeAnime(movie)) {
+            var serial = movie.number_of_seasons || movie.name || movie.first_air_date;
+            return Lampa.Noty.show('AniTube стежить лише за аніме.' + (serial ? ' Для серіалів є дзвіночок Lampa на цій картці.' : ''));
+        }
         var all = Lampa.Storage.get('anitube_choice', '{}'), choice = (all && all[String(movie.id)]) || {};
         if ((!choice.source || choice.source === 'anitube') && /^https:\/\/anitube\.in\.ua\//.test(choice.title || '')) {
             return followAdd(movie, {url: choice.title, title: choice.name || movie.title || movie.name || 'AniTube', note: ''});
