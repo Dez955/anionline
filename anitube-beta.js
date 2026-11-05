@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.5';
+    var VERSION = '2.0.6';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -441,7 +441,7 @@
             success(config.url, config.subtitles, config.quality);
         }
         function proxy() {
-            $.ajax({url: homeUrl(homeProxy(), 'moon', 'url', url), dataType: 'text', timeout: 20000, success: read,
+            ajaxRetry({url: homeUrl(homeProxy(), 'moon', 'url', url), dataType: 'text', timeout: 20000, success: read,
                 error: function (xhr) { failure(moonFailure(xhr, true)); }});
         }
         if (window.Lampa && Lampa.Platform && Lampa.Platform.is('android')) {
@@ -472,21 +472,35 @@
         var key = homeKey();
         return home + '/' + action + '?' + name + '=' + encodeURIComponent(value) + (key ? '&key=' + encodeURIComponent(key) : '');
     }
+    // The route from a home connection to Cloudflare (Worker, AniTube, Moon) sometimes loses 10-30% of packets: a request then never gets
+    // an HTTP answer (status 0). Such a request is repeated once; an answer of any HTTP status, and a request cancelled on purpose, is not.
+    function ajaxRetry(settings) {
+        var failed = settings.error, repeated = false;
+        settings.error = function (xhr, status) {
+            if (!repeated && xhr && !xhr.status && status !== 'abort') {
+                repeated = true;
+                setTimeout(function () { $.ajax(settings); }, 500);
+                return;
+            }
+            if (failed) failed.apply(this, arguments);
+        };
+        return $.ajax(settings);
+    }
     function proxyText(action, value, success, failure) {
         // Neither the helper nor the Netlify function caches anything; AniTube is fetched on demand.
         var home = homeProxy();
         var name = action === 'search' ? 'q' : 'url';
         var url = home ? homeUrl(home, action, name, value) : API + '?action=' + action + '&' + name + '=' + encodeURIComponent(value);
-        $.ajax({url: url, dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
+        ajaxRetry({url: url, dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
     }
     function proxyPlaylist(url, success, failure) {
         var home = homeProxy();
-        $.ajax({url: home ? homeUrl(home, 'playlist', 'url', url) : API + '?action=playlist&url=' + encodeURIComponent(url), dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
+        ajaxRetry({url: home ? homeUrl(home, 'playlist', 'url', url) : API + '?action=playlist&url=' + encodeURIComponent(url), dataType: 'json', timeout: 25000, cache: false, success: success, error: failure});
     }
     function proxyEmbed(url, success, failure) {
         var home = homeProxy();
         if (!home) return failure('домашній проксі не налаштовано');
-        $.ajax({url: homeUrl(home, 'embed', 'url', url), dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
+        ajaxRetry({url: homeUrl(home, 'embed', 'url', url), dataType: 'text', timeout: 20000, cache: false, success: success, error: failure});
     }
     function reason(e) {
         if (e && e.status) return 'HTTP ' + e.status;
@@ -689,7 +703,7 @@
     function proxyUafix(action, value, success, failure) {
         var type = action === 'episode' ? 'json' : 'text';
         function viaWorker(onError) {
-            $.ajax({url: homeUrl(homeProxy(), 'uf/' + action, action === 'search' ? 'q' : 'url', value), dataType: type,
+            ajaxRetry({url: homeUrl(homeProxy(), 'uf/' + action, action === 'search' ? 'q' : 'url', value), dataType: type,
                 timeout: 25000, cache: false, success: success, error: onError || failure});
         }
         // The home box goes first: it asks uafix from a Ukrainian address, which the Worker cannot.
@@ -1028,7 +1042,7 @@
         }
         direct('https://animeon.club/api' + paths[action], {dataType: 'text', headers: {'Referer': '', 'Accept': 'application/json'}}, read, function () {
             var query = Object.keys(params).map(function (key) { return key + '=' + encodeURIComponent(params[key]); }).join('&');
-            $.ajax({url: homeProxy() + '/animeon/' + action + '?' + query + '&key=' + encodeURIComponent(homeKey()), dataType: 'text', timeout: 20000, success: read,
+            ajaxRetry({url: homeProxy() + '/animeon/' + action + '?' + query + '&key=' + encodeURIComponent(homeKey()), dataType: 'text', timeout: 20000, success: read,
                 error: function (xhr) { failure(xhr, xhr && xhr.status === 404 ? 'онови Worker у Cloudflare для прямого AnimeOn' : 'AnimeOn не відповів'); }});
         });
     }
@@ -1088,7 +1102,7 @@
         function proxy() {
             var home = homeProxy();
             if (!home) return failure('домашній проксі не налаштовано');
-            $.ajax({url: homeUrl(home, 'animeon', 'id', id), dataType: 'text', timeout: 20000, cache: false, success: read, error: function (xhr) {
+            ajaxRetry({url: homeUrl(home, 'animeon', 'id', id), dataType: 'text', timeout: 20000, cache: false, success: read, error: function (xhr) {
                 failure(xhr && xhr.status === 404 ? 'потрібно оновити Worker у Cloudflare' : 'AnimeOn не відповів');
             }});
         }
@@ -2674,9 +2688,9 @@
     // Lampa polls nothing itself (its own premieres arrive from CUB), so the plugin asks AniTube for the playlist of each followed
     // title: once after Lampa has started, then at most every FOLLOW_EVERY per title, one title at a time with a pause between.
     // Everything is stored on this device only: the list in Lampa's storage, the notices in the bell's own IndexedDB table.
-    var FOLLOW_STORE = 'anitube_follow', FOLLOW_EVERY = 20 * 60 * 1000, FOLLOW_RETRY = 30 * 60 * 1000, FOLLOW_MAX = 15, FOLLOW_GAP = 2500;
+    var FOLLOW_STORE = 'anitube_follow', FOLLOW_EVERY = 5 * 60 * 1000, FOLLOW_RETRY = 10 * 60 * 1000, FOLLOW_MAX = 15, FOLLOW_GAP = 2500;
     // A star on a title that AniTube does not have (yet) stays in the list; the title is looked for again every FOLLOW_FIND, for FOLLOW_GIVE_UP.
-    var FOLLOW_FIND = 6 * 3600 * 1000, FOLLOW_GIVE_UP = 30 * 24 * 3600 * 1000, FOLLOW_TICK = 5 * 60 * 1000;
+    var FOLLOW_FIND = 6 * 3600 * 1000, FOLLOW_GIVE_UP = 30 * 24 * 3600 * 1000, FOLLOW_TICK = 60 * 1000;
     var FOLLOW_MODES = {any: 'Будь-що', subs: 'Субтитри', dub: 'Озвучення'};
     var followButtons = [], followBusy = false, followLooking = {};
 
@@ -2876,15 +2890,19 @@
             end(variants.length ? followSnapshot(variants) : null);
         }, function () { end(null); });
     }
+    // Nothing is asked in the background while a video is open: the home connection and an older TV have enough to do.
+    function followPlaying() {
+        try { return !!(Lampa.Player && Lampa.Player.opened && Lampa.Player.opened()); } catch (e) { return false; }
+    }
     function followRun() {
-        if (followBusy || !window.Lampa) return;
+        if (followBusy || !window.Lampa || followPlaying()) return;
         noticeReady();
         var all = followAll(), now = Date.now();
         var due = Object.keys(all).filter(function (id) { return !all[id].gaveUp && (!all[id].next || all[id].next <= now); }).slice(0, FOLLOW_MAX);
         if (!due.length) return;
         followBusy = true;
         (function step(i) {
-            if (i >= due.length) { followBusy = false; return; }
+            if (i >= due.length || followPlaying()) { followBusy = false; return; }
             followCheck(due[i], function () { setTimeout(function () { step(i + 1); }, FOLLOW_GAP); });
         })(0);
     }
