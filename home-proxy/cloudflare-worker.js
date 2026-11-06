@@ -9,6 +9,7 @@
 //   GET /moon?url=<page>&key=<key>     a public moonanime.net/art iframe page
 //   GET /animeon?id=<episode>&key=<key>  the Ashdi page of one AnimeOn episode
 //   GET /embed?url=<page>&key=<key>    an Ashdi player page (https://ashdi.vip/vod/<id>) or show page (https://ashdi.vip/serial/<id>)
+//   POST /sync?key=<key>               the plugin's shared follow list ({code, items}); needs a KV namespace bound as SYNC
 //
 // Second source, uafix.net (same rules: only these addresses, no redirects, nothing stored). uafix refuses Cloudflare's servers (HTTP 403),
 // so when EMBED_URL is set, /uf/search, /uf/page and /uf/episode are relayed to the bot's /uf/* routes (same ACCESS_KEY) the way /embed is.
@@ -43,7 +44,7 @@ const UPSTREAM_STATUS = 424;
 
 const HEADERS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Cache-Control': 'no-store, no-cache, must-revalidate',
   'Pragma': 'no-cache'
@@ -298,16 +299,92 @@ async function animeonEpisode(id) {
   return json({ videoUrl: page.origin + page.pathname });
 }
 
+// ---- Shared follow list of the plugin (POST /sync): the owner's TVs type the same code and get one list. -------------------
+// Needs a KV namespace bound to this Worker as SYNC (Settings -> Bindings -> KV namespace). The code itself is not stored: the record key is its
+// SHA-256. Each title is {t, r} or a removal {t, del}; the newer t wins, so the order in which TVs sync does not matter. Removals older than
+// 120 days are dropped. Only plain values are kept, sizes are capped.
+const SYNC_MAX_BODY = 400_000;
+const SYNC_MAX_ITEMS = 500;
+const SYNC_GONE_KEEP = 120 * 24 * 3600 * 1000;
+async function syncRecordKey(code) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('anitube-follow:' + code));
+  return 'follow:' + [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+function syncPlain(value, depth) {
+  if (typeof value === 'string') return value.slice(0, 600);
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value === 'boolean') return value;
+  if (depth > 0 && value && typeof value === 'object' && !Array.isArray(value)) {
+    const out = {};
+    for (const name of Object.keys(value).slice(0, 80)) {
+      if (!/^[a-zA-Z0-9_]{1,40}$/.test(name)) continue;
+      const v = syncPlain(value[name], depth - 1);
+      if (v !== undefined) out[name] = v;
+    }
+    return out;
+  }
+  return undefined;
+}
+function syncEntry(id, entry) {
+  if (!/^\d{1,12}$/.test(id) || !entry || typeof entry !== 'object') return null;
+  const t = Number(entry.t);
+  if (!Number.isFinite(t) || t <= 0 || t > Date.now() + 24 * 3600 * 1000) return null;
+  if (entry.del) return { t, del: true };
+  const r = entry.r && typeof entry.r === 'object' ? entry.r : null;
+  if (!r) return null;
+  const url = typeof r.url === 'string' && /^https:\/\/anitube\.in\.ua\/[^\s]{1,300}$/.test(r.url) ? r.url : '';
+  const clean = {
+    id, url,
+    title: String(r.title || '').slice(0, 300),
+    mode: ['any', 'subs', 'dub'].includes(r.mode) ? r.mode : 'any',
+    card: syncPlain(r.card, 1) || {},
+    added: Number(r.added) || 0,
+    total: Number(r.total) || 0
+  };
+  return JSON.stringify(clean).length > 20000 ? null : { t, r: clean };
+}
+async function followSync(request, env) {
+  if (!env || !env.SYNC || typeof env.SYNC.get !== 'function' || typeof env.SYNC.put !== 'function') return json({ error: 'sync_not_configured' }, 503);
+  if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+  const text = await request.text();
+  if (text.length > SYNC_MAX_BODY) return json({ error: 'too_large' }, 413);
+  let body;
+  try { body = JSON.parse(text); } catch (e) { return json({ error: 'invalid_json' }, 400); }
+  const code = String((body && body.code) || '').trim().toLowerCase();
+  if (!/^[a-z0-9-]{6,40}$/.test(code)) return json({ error: 'invalid_code' }, 400);
+  const incoming = body && body.items && typeof body.items === 'object' ? body.items : {};
+  const recordKey = await syncRecordKey(code);
+  let stored = {};
+  try { stored = JSON.parse((await env.SYNC.get(recordKey)) || '{}') || {}; } catch (e) { stored = {}; }
+  const merged = {};
+  const now = Date.now();
+  let changed = false;
+  for (const id of Object.keys(stored)) {
+    const entry = stored[id];
+    if (entry && entry.del && now - entry.t > SYNC_GONE_KEEP) { changed = true; continue; }
+    merged[id] = entry;
+  }
+  for (const id of Object.keys(incoming).slice(0, SYNC_MAX_ITEMS * 2)) {
+    const entry = syncEntry(id, incoming[id]);
+    if (!entry) continue;
+    if (!merged[id] || entry.t > merged[id].t) { merged[id] = entry; changed = true; }
+  }
+  if (Object.keys(merged).length > SYNC_MAX_ITEMS) return json({ error: 'too_many' }, 413);
+  if (changed) await env.SYNC.put(recordKey, JSON.stringify(merged));
+  return json({ items: merged });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: HEADERS });
-    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     const url = new URL(request.url);
+    if (request.method !== 'GET' && !(request.method === 'POST' && url.pathname === '/sync')) return json({ error: 'method_not_allowed' }, 405);
     if (url.pathname === '/health') return json({ ok: true });
     const key = String((env && env.ACCESS_KEY) || '').trim();
     if (key.length < MIN_KEY_LENGTH) return json({ error: 'not_configured' }, 503);
     if (!sameSecret(url.searchParams.get('key') || '', key)) return json({ error: 'forbidden' }, 403);
     try {
+      if (url.pathname === '/sync') return await followSync(request, env);
       if (url.pathname === '/search') return await search((url.searchParams.get('q') || '').trim());
       if (url.pathname === '/playlist') return await playlist(url.searchParams.get('url') || '');
       if (url.pathname === '/moon') return await moonPage(url.searchParams.get('url') || '');

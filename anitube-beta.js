@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.6';
+    var VERSION = '2.0.7';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1474,7 +1474,7 @@
     // that shares the most words with it, otherwise the first.
     function pickName(parts, shown) {
         var target = normalize(shown);
-        var same = parts.filter(function (part) { return normalize(part) === target; })[0];
+        var same = target ? parts.filter(function (part) { return normalize(part) === target; })[0] : null;
         if (same) return same;
         var wanted = nameWords(shown), best = parts[0], bestScore = -1;
         parts.forEach(function (part) {
@@ -2827,6 +2827,7 @@
                 rec.url = found.pick.url; rec.title = found.pick.title;
                 rec.total = +((String(found.pick.note || '').match(/(\d+)\s*з\s*(\d+)/) || [])[2] || 0);
                 rec.next = 0; delete rec.gaveUp;
+                rec.t = now; followSyncSoon();
             } else {
                 rec.next = now + (found.failed ? FOLLOW_RETRY : FOLLOW_FIND);
                 if (!found.failed && now - (rec.searchFrom || rec.added || now) > FOLLOW_GIVE_UP) rec.gaveUp = true;
@@ -2840,6 +2841,7 @@
         var record = followAll()[id], finished = false, timer = null, latest = null;
         if (!record) return done();
         if (!record.url) return followFind(id, done);
+        if (followNeedsTitle(record)) return followRetitle(id, function () { followCheck(id, done); });
         function end(snap) {
             if (finished) return;
             finished = true; clearTimeout(timer);
@@ -2969,6 +2971,8 @@
             followHead();
             setTimeout(followRun, 8000);
             setInterval(followRun, FOLLOW_TICK);
+            setTimeout(followSync, 5000);
+            setInterval(followSync, SYNC_EVERY);
         }
         if (window.appready) go();
         else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') go(); });
@@ -2988,8 +2992,10 @@
         if (!item || !item.url) {
             if (all[id]) return;
             var own = movie.title || movie.name || movie.original_title || movie.original_name || 'AniTube';
-            all[id] = {id: id, url: '', title: own, mode: followMode(), added: Date.now(), total: 0, card: followCard(movie), next: 0};
+            all[id] = {id: id, url: '', title: own, mode: followMode(), added: Date.now(), total: 0, card: followCard(movie), next: 0, t: Date.now()};
             followSave(all);
+            followGoneClear(id);
+            followSyncSoon();
             followChanged();
             Lampa.Noty.show('AniTube: стежу за «' + own + '»');
             setTimeout(followRun, 1500);
@@ -3000,8 +3006,10 @@
         delete record.gaveUp;
         // Another season's page restarts the count: its episodes are new, but nothing is announced for the first look.
         if (record.url && record.url !== item.url) delete record.seen;
-        all[id] = Object.assign(record, {id: id, url: item.url, title: item.title, total: total, card: followCard(movie), next: 0});
+        all[id] = Object.assign(record, {id: id, url: item.url, title: item.title, total: total, card: followCard(movie), next: 0, t: Date.now()});
         followSave(all);
+        followGoneClear(id);
+        followSyncSoon();
         followChanged();
         Lampa.Noty.show('AniTube: стежу за «' + item.title + '»');
         setTimeout(followRun, 1500);
@@ -3011,9 +3019,141 @@
         if (!all[String(id)]) return;
         delete all[String(id)];
         followSave(all);
+        var gone = followGone();
+        gone[String(id)] = Date.now();
+        followGoneSave(gone);
         followChanged();
+        followSyncSoon();
         Lampa.Noty.show('AniTube: більше не стежу');
     }
+    // A title in the list that is not written in Ukrainian (the card's Japanese name, kept when AniTube did not answer at the moment of adding):
+    // AniTube is searched with the card's names and the followed page's own title is taken. Tried at most once in six hours.
+    function followNeedsTitle(record) {
+        return !!(record && record.url && !/[а-яіїєґ]/i.test(record.title || '') && (!record.titleTry || Date.now() - record.titleTry > FOLLOW_FIND));
+    }
+    function followRetitle(id, done) {
+        var record = followAll()[id], card = (record && record.card) || {};
+        if (!record) return done();
+        var extra = [], waiting = 2;
+        function got(list) { extra = extra.concat(list || []); if (--waiting === 0) go(); }
+        tmdbTitles(card, got);
+        anilistTitles(card, got);
+        function go() {
+            var tiers = nameTiers(card, unique(extra)), names = [].concat(tiers[0], tiers[1], tiers[2]).slice(0, 3), title = '';
+            (function next(i) {
+                if (title || i >= names.length) return finish();
+                fetchText('search', names[i], function (html) {
+                    catalog(html).forEach(function (r) { if (!title && r.url === record.url && r.title) title = r.title; });
+                    next(i + 1);
+                }, function () { next(i + 1); });
+            })(0);
+            function finish() {
+                var all = followAll(), rec = all[id];
+                if (!rec) return done();
+                rec.titleTry = Date.now();
+                if (title) {
+                    var parts = String(title).split(/\s+\/\s+/).map(function (part) { return part.trim(); }).filter(Boolean);
+                    title = shortName(parts.length > 1 ? pickName(parts, '') : title);
+                }
+                if (title && title !== rec.title) { rec.title = title; rec.t = Date.now(); followSyncSoon(); }
+                followSave(all);
+                followChanged();
+                done();
+            }
+        }
+    }
+
+    // ---- The same list on the owner's own TVs: one code typed on each (Settings -> AniTube). Nothing is sent without a code. ----
+    // Only the list travels (titles, their AniTube page, the mode). Counts and notices stay on each device, so every TV announces new episodes itself.
+    // It is kept by the owner's Cloudflare Worker (/sync, storage SYNC). Removals are remembered as dated marks, so a title removed on one TV does not
+    // come back from the other; the newer change of a title wins.
+    var FOLLOW_GONE = 'anitube_follow_gone', SYNC_EVERY = 30 * 60 * 1000, syncTimer = null, syncBusy = false, syncAgain = false;
+    function syncCode() {
+        var code = '';
+        try { code = String(Lampa.Storage.get('anitube_sync_code', '') || '').trim().toLowerCase(); } catch (e) {}
+        return /^[a-z0-9-]{6,40}$/.test(code) ? code : '';
+    }
+    function followGone() {
+        var gone = Lampa.Storage.get(FOLLOW_GONE, '{}');
+        if (typeof gone === 'string') { try { gone = JSON.parse(gone); } catch (e) { gone = {}; } }
+        return gone && typeof gone === 'object' ? gone : {};
+    }
+    function followGoneSave(gone) { Lampa.Storage.set(FOLLOW_GONE, gone, true); }
+    function followGoneClear(id) {
+        var gone = followGone();
+        if (gone[String(id)]) { delete gone[String(id)]; followGoneSave(gone); }
+    }
+    function followLite(record) {
+        return {id: record.id, url: record.url || '', title: record.title || '', mode: record.mode || 'any', card: record.card || {}, added: record.added || 0, total: record.total || 0};
+    }
+    function followSyncSoon() {
+        if (!syncCode()) return;
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(function () { followSync(false); }, 3000);
+    }
+    // Applies the shared list; returns how many titles came from another TV.
+    function followMerge(server) {
+        if (!server || typeof server !== 'object') return 0;
+        var all = followAll(), gone = followGone(), added = 0, changed = false;
+        Object.keys(server).forEach(function (id) {
+            var entry = server[id];
+            if (!entry || !(entry.t > 0)) return;
+            var mine = all[id], mineTime = mine ? (mine.t || mine.added || 1) : (gone[id] || 0);
+            if (entry.t <= mineTime) return;
+            changed = true;
+            if (entry.del) {
+                if (mine) delete all[id];
+                gone[id] = entry.t;
+                return;
+            }
+            var r = entry.r || {}, record = mine || {next: 0, added: r.added || entry.t};
+            var moved = !mine || (r.url || '') !== (mine.url || '');
+            if (mine && mine.url && moved) delete record.seen;
+            if (!mine) added++;
+            all[id] = Object.assign(record, {id: id, url: r.url || '', title: r.title || record.title || 'AniTube', mode: FOLLOW_MODES[r.mode] ? r.mode : 'any',
+                card: r.card && typeof r.card === 'object' ? r.card : (record.card || {}), total: +r.total || 0, t: entry.t});
+            if (moved) all[id].next = 0;
+            delete gone[id];
+        });
+        if (changed) { followSave(all); followGoneSave(gone); followChanged(); }
+        return added;
+    }
+    function syncFailure(xhr) {
+        var said = '';
+        try { said = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
+        if (said === 'sync_not_configured') return 'у Worker не підключене сховище SYNC';
+        if (xhr && xhr.status === 404) return 'Worker ще без синхронізації: потрібен новий код і Deploy';
+        if (xhr && xhr.status === 403) return 'ключ Worker не підходить';
+        if (said === 'invalid_code') return 'код має бути від 6 латинських літер, цифр чи дефісів';
+        return xhr && xhr.status ? 'HTTP ' + xhr.status + (said ? ' – ' + said : '') : 'немає зв\'язку з Worker';
+    }
+    function followSync(manual) {
+        var code = syncCode();
+        if (!code) {
+            if (manual) Lampa.Noty.show('AniTube: синхронізація вимкнена. Введи код від 6 латинських літер, цифр чи дефісів.');
+            return;
+        }
+        if (syncBusy) { syncAgain = true; return; }
+        syncBusy = true;
+        var all = followAll(), gone = followGone(), items = {};
+        Object.keys(all).forEach(function (id) { items[id] = {t: all[id].t || all[id].added || 1, r: followLite(all[id])}; });
+        Object.keys(gone).forEach(function (id) { if (!items[id] || gone[id] > items[id].t) items[id] = {t: gone[id], del: true}; });
+        function finish(ok, added, xhr) {
+            syncBusy = false;
+            if (manual) Lampa.Noty.show(ok ? 'AniTube: стеження синхронізовано, у списку ' + Object.keys(followAll()).length : 'AniTube: синхронізація не вдалася (' + syncFailure(xhr) + ')');
+            if (added) setTimeout(followRun, 1500);
+            if (syncAgain) { syncAgain = false; followSyncSoon(); }
+        }
+        try {
+            $.ajax({
+                url: homeProxy() + '/sync?key=' + encodeURIComponent(homeKey()), type: 'POST', contentType: 'text/plain', dataType: 'json', timeout: 20000, cache: false,
+                data: JSON.stringify({code: code, items: items}),
+                success: function (data) { finish(true, followMerge(data && data.items)); },
+                error: function (xhr) { finish(false, 0, xhr); }
+            });
+        } catch (e) { finish(false, 0, null); }
+    }
+
     // The star on Lampa's own card page: unfollow, follow the title opened before, or open the screen which follows it once found.
     // False only when the card clearly is not anime: TMDB genres without Animation (16), or Animation from outside Japan, China and Korea
     // (Western cartoons). A card without genres or without a language is given the benefit of the doubt.
@@ -3147,7 +3287,7 @@
             onSelect: function (picked) {
                 Lampa.Controller.toggle(back);
                 var all = followAll();
-                if (all[id]) { all[id].mode = picked.mode; followSave(all); }
+                if (all[id]) { all[id].mode = picked.mode; all[id].t = Date.now(); followSave(all); followSyncSoon(); }
                 followMenu(id, back);
             }
         });
@@ -3214,6 +3354,18 @@
                 param: {name: 'anitube_follow_list', type: 'button'},
                 field: {name: 'Мої стеження', description: 'Аніме із зірочкою: скільки серій субтитрів і озвучення вже було, змінити режим або прибрати.'},
                 onChange: function () { followList(); }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_sync_code', type: 'input', values: '', 'default': '', placeholder: 'напр. tolik-anime-2026'},
+                field: {name: 'Код синхронізації стежень', description: 'Однаковий код на кількох своїх ТВ робить список «Мої стеження» спільним. Від 6 латинських літер, цифр чи дефісів. Порожньо — список лише на цьому пристрої.'},
+                onChange: function () { setTimeout(function () { followSync(true); }, 300); }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_sync_now', type: 'button'},
+                field: {name: 'Синхронізувати стеження зараз', description: 'Звичайно це відбувається саме: при запуску, після кожної зірочки й раз на 30 хвилин.'},
+                onChange: function () { followSync(true); }
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',

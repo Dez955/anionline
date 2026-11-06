@@ -1,10 +1,10 @@
-Published stable: **1.8.19**; beta: **2.0.6** (one retry after a lost request, new-episode check every 5 minutes and not during playback; star follows anime only; star on the card row adds without opening anything, star list in the header opens the Lampa page of the title, AniTube tab in the Lampa bell, per-source search name, grouped sources). Previous stable 1.8.2 is kept as old/anitube-1.8.2.js. See [BETA.md](BETA.md).
+Published stable: **1.8.19**; beta: **2.0.7** (follow list synced between own TVs by a code, Ukrainian titles in the list; one retry after a lost request, new-episode check every 5 minutes and not during playback; star follows anime only; star on the card row adds without opening anything, star list in the header opens the Lampa page of the title, AniTube tab in the Lampa bell, per-source search name, grouped sources). Previous stable 1.8.2 is kept as old/anitube-1.8.2.js. See [BETA.md](BETA.md).
 
 # AniTube for Lampa
 
 A Lampa plugin that adds a **🟢 AniTube** action to a card. It opens a series page (voice, season and episode chips, like the UAKino plugin's) with Ukrainian voice-overs and subtitles, and plays the episode in Lampa's player with a playlist, so next/previous episode work.
 
-Stable version: **1.8.19**. Beta version: **2.0.6**.
+Stable version: **1.8.19**. Beta version: **2.0.7**.
 
 Beta installation and limitations: [BETA.md](BETA.md). Main `anitube.js` stays 1.8.19 until the beta is confirmed.
 
