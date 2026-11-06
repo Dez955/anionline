@@ -18,6 +18,9 @@
 //   GET /uf/page?url=<page>&key=<key>   a show page or an episode page of uafix (HTML)
 //   GET /uf/episode?url=<page>&key=<key> {"player": "https://zetvideo.net/vod/<id>"} taken from an episode page (a small answer)
 //   GET /uf/embed?url=<page>&key=<key>  a zetvideo player page (https://zetvideo.net/vod/<id>)
+//   POST /uf/login?key=<key>            body {login, password}: signs in to the CALLER's own uafix.net account (through the bot) and answers
+//                                       {ok, cookie}. uafix shows the player to a signed-in member from any country. Nothing is stored here;
+//                                       the three /uf routes above then accept &cookie=<that cookie> and pass it to uafix.net only.
 //
 // Third source, DoramaUA (its API at api.doramaua.tv is open to browsers, so only the player page needs this helper). The player page
 // (https://w.davidog.top/<id>?ep=<n>&track=<n>) lists the voices and holds the stream address in plain text; it sends no CORS header.
@@ -27,6 +30,11 @@
 //   GET /uaserials/search?q=<text>&key=<key>   UA Serials search page (HTML)
 //   GET /uaserials/page?url=<page>&key=<key>   one UA Serials title page (HTML)
 //   GET /uaserials/player?url=<page>&key=<key> one public HDVB iframe page (HTML)
+//
+// Eneyida and Klon UA (DLE catalogues) and the public HDVB player page Eneyida embeds (no Referer, no made-up header).
+//   GET /dle/<eneyida|klon>/search?q=<text>&key=<key>  the site's search page (HTML)
+//   GET /dle/<eneyida|klon>/page?url=<page>&key=<key>  one title page of that site (HTML)
+//   GET /dle/eneyida/player?url=<page>&key=<key>       https://hdvbua.pro/embd/<id> (a show) or /vid/<id> (a film) (HTML)
 //
 // Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
 // from somewhere Ashdi accepts, add a plain-text variable EMBED_URL = the address of the bot's proxy, e.g.
@@ -180,6 +188,23 @@ async function ufRelay(path, url, env) {
   return reply(body, 200, response.headers.get('Content-Type') || 'text/plain; charset=utf-8');
 }
 
+// Signs in to uafix.net with the caller's own login and password. uafix refuses Cloudflare's servers, so the bot (EMBED_URL) does it.
+async function ufLogin(request, env) {
+  const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
+  if (!/^https:\/\/\S+$/.test(relay)) return json({ ok: false, error: 'EMBED_URL (адреса бота) не задана у Worker' }, UPSTREAM_STATUS);
+  let body;
+  try { body = JSON.parse(await request.text()); } catch (e) { return json({ ok: false, error: 'invalid_json' }, 400); }
+  const login = String((body && body.login) || '').trim();
+  const password = String((body && body.password) || '');
+  if (!login || !password || login.length > 100 || password.length > 200) return json({ ok: false, error: 'вкажіть логін і пароль' }, 400);
+  const target = relay + '/uf/login?key=' + encodeURIComponent(String(env.ACCESS_KEY).trim());
+  const response = await fetch(target, { method: 'POST', redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Content-Type': 'application/json' }, body: JSON.stringify({ login, password }) });
+  const text = await response.text();
+  let answer;
+  try { answer = JSON.parse(text); } catch (e) { return json({ ok: false, error: 'бот відповів HTTP ' + response.status }, UPSTREAM_STATUS); }
+  return json({ ok: !!answer.ok, cookie: answer.ok ? String(answer.cookie || '') : undefined, error: answer.ok ? undefined : String(answer.error || 'помилка входу').slice(0, 180) }, response.ok ? 200 : response.status === 404 ? 404 : response.status);
+}
+
 async function ufSearch(query) {
   if (!query || query.length > 200) return json({ error: 'invalid_query' }, 400);
   const url = new URL('/index.php', UAFIX);
@@ -232,6 +257,40 @@ async function uaserialsPlayer(raw) {
   return read(await fetch(page, { redirect: 'manual', headers: {
     'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Referer': UASERIALS + '/'
   } }));
+}
+
+// Eneyida and Klon UA (DLE catalogues) and the HDVB player page Eneyida embeds. No Referer and no made-up header is sent.
+const DLE_SITES = {
+  eneyida: { host: 'eneyida.tv', page: /^\/[0-9]{1,8}-[a-z0-9-]+\.html$/i },
+  klon: { host: 'klonua.com', page: /^\/[a-z0-9-]+\/[0-9]{1,8}-[a-z0-9-]+\.html$/i }
+};
+const HDVB_EMBED = /^\/(?:embd|vid)\/[0-9]{1,10}$/;
+
+function plainGet(url) {
+  return fetch(url, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8' } });
+}
+
+async function dleRoute(site, action, params) {
+  const rule = DLE_SITES[site];
+  if (!rule) return null;
+  if (action === 'search') {
+    const query = (params.get('q') || '').trim();
+    if (!query || query.length > 200) return json({ error: 'invalid_query' }, 400);
+    const url = new URL('/index.php', 'https://' + rule.host);
+    url.searchParams.set('do', 'search');
+    url.searchParams.set('subaction', 'search');
+    url.searchParams.set('story', query);
+    return html(await read(await plainGet(url.href)));
+  }
+  if (action === 'page') {
+    const page = validPage(params.get('url') || '', rule.host, rule.page);
+    return page ? html(await read(await plainGet(page))) : json({ error: 'invalid_page' }, 400);
+  }
+  if (action === 'player') {
+    const page = validPage(params.get('url') || '', 'hdvbua.pro', HDVB_EMBED);
+    return page ? html(await read(await plainGet(page))) : json({ error: 'invalid_player' }, 400);
+  }
+  return null;
 }
 
 const DORAMA_PLAYER = 'https://w.davidog.top';
@@ -378,7 +437,7 @@ export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: HEADERS });
     const url = new URL(request.url);
-    if (request.method !== 'GET' && !(request.method === 'POST' && url.pathname === '/sync')) return json({ error: 'method_not_allowed' }, 405);
+    if (request.method !== 'GET' && !(request.method === 'POST' && (url.pathname === '/sync' || url.pathname === '/uf/login'))) return json({ error: 'method_not_allowed' }, 405);
     if (url.pathname === '/health') return json({ ok: true });
     const key = String((env && env.ACCESS_KEY) || '').trim();
     if (key.length < MIN_KEY_LENGTH) return json({ error: 'not_configured' }, 503);
@@ -391,6 +450,7 @@ export default {
       if (url.pathname === '/animeon') return await animeonEpisode(url.searchParams.get('id') || '');
       if (['/animeon/search', '/animeon/translations', '/animeon/episodes'].includes(url.pathname)) return await animeonCatalogApi(url.pathname.split('/')[2], url.searchParams);
       if (url.pathname === '/embed') return await embed(url.searchParams.get('url') || '', env);
+      if (url.pathname === '/uf/login') return await ufLogin(request, env);
       if (['/uf/search', '/uf/page', '/uf/episode'].includes(url.pathname)) {
         const relayed = await ufRelay(url.pathname.slice(4), url, env);
         if (relayed) return relayed;
@@ -416,6 +476,11 @@ export default {
       if (url.pathname === '/uaserials/player') {
         const text = await uaserialsPlayer(url.searchParams.get('url') || '');
         return text === null ? json({ error: 'invalid_uaserials_player' }, 400) : html(text);
+      }
+      const dle = url.pathname.match(/^\/dle\/([a-z]+)\/(search|page|player)$/);
+      if (dle) {
+        const answer = await dleRoute(dle[1], dle[2], url.searchParams);
+        if (answer) return answer;
       }
       return json({ error: 'not_found' }, 404);
     } catch (error) {

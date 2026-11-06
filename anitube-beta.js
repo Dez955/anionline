@@ -1,11 +1,11 @@
-/* AniTube for Lampa. Sources: AniTube, Makhno, AnimeOn, UAflix, DoramaUA, AniLibria. Series page laid out like the UAKino plugin's.
+/* AniTube for Lampa. Sources: AniTube, UAFilms, AnimeOn, UAflix, DoramaUA, UA Serials, Eneyida, Klon UA, AniLibria. Series page laid out like the UAKino plugin's.
    No provider scripts are executed. */
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.7';
+    var VERSION = '2.0.8';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix and DoramaUA need one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -547,10 +547,71 @@
             Lampa.Noty.show('Приставка ' + boxAddress().replace(/^https?:\/\//i, '') + ' відповіла. ' + (parts.join('; ') || 'без деталей'), {time: 10000});
         }, function (xhr) { Lampa.Noty.show('AniTube: ' + boxReason(xhr), {time: 8000}); });
     }
+    // ---- The member's own uafix.net account, kept the way the UAKino plugin keeps it -----------------------------------------------------
+    // uafix shows a visitor from outside Ukraine only a trailer, but shows the player to a signed-in member. The login and password are typed
+    // in Lampa's settings (Налаштування → AniTube → UAflix — акаунт); the owner's helper signs in (POST /uf/login) and returns the session cookie,
+    // which is kept in Lampa and sent back with the uafix requests. Without a login nothing here does anything.
+    var UAFIX_FAIL_PAUSE = 6 * 3600 * 1000;
+    function stored(name) { try { return String(Lampa.Storage.get(name, '') || ''); } catch (e) { return ''; } }
+    function uafixCookie() { return stored('anitube_uafix_cookie'); }
+    function uafixCredentials() { return !!(stored('anitube_uafix_login') && stored('anitube_uafix_pass')); }
+    function uafixClearCookie() { try { Lampa.Storage.set('anitube_uafix_cookie', ''); } catch (e) {} }
+    function uafixLogin(done) {
+        var login = stored('anitube_uafix_login'), password = stored('anitube_uafix_pass');
+        if (!login || !password) return done(false, 'вкажіть логін і пароль');
+        $.ajax({url: homeProxy() + '/uf/login' + (homeKey() ? '?key=' + encodeURIComponent(homeKey()) : ''), type: 'POST', contentType: 'application/json',
+            data: JSON.stringify({login: login, password: password}), dataType: 'json', timeout: 30000, cache: false,
+            success: function (data) {
+                if (data && data.ok && data.cookie) {
+                    try { Lampa.Storage.set('anitube_uafix_cookie', String(data.cookie)); Lampa.Storage.set('anitube_uafix_fail', 0); } catch (e) {}
+                    return done(true);
+                }
+                uafixClearCookie();
+                done(false, (data && data.error) || 'помилка входу');
+            },
+            error: function (xhr) {
+                var said = '';
+                try { said = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
+                uafixClearCookie();
+                // Only a refusal by uafix itself pauses the automatic attempts; a network failure does not.
+                if (xhr && (xhr.status === 401 || xhr.status === 429)) { try { Lampa.Storage.set('anitube_uafix_fail', Date.now()); } catch (e) {} }
+                done(false, xhr && xhr.status === 404 ? 'Worker або бот ще без входу в UAflix: оновіть їх (див. BETA.md)' : said || 'проксі не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : ''));
+            }});
+    }
+    // Before a uafix request: sign in when a login is saved but there is no cookie yet (not again within six hours after uafix refused it).
+    function uafixEnsureLogin(done) {
+        var failedAt = Number(stored('anitube_uafix_fail')) || 0;
+        if (uafixCookie() || !uafixCredentials() || Date.now() - failedAt < UAFIX_FAIL_PAUSE) return done();
+        uafixLogin(function () { done(); });
+    }
+    function uafixStatus() {
+        var login = stored('anitube_uafix_login');
+        return uafixCookie() ? 'Вхід виконано' + (login ? ' (' + login + ')' : '') : 'Вхід не виконано';
+    }
+    function uafixRefreshUI() {
+        try {
+            var logged = !!uafixCookie();
+            var enter = $('.settings-param[data-name="anitube_uafix_enter"]');
+            enter.find('.settings-param__name').text(logged ? 'Вийти' : 'Увійти');
+            enter.find('.settings-param__descr').text(uafixStatus());
+            $('.settings-param[data-name="anitube_uafix_pass"]').toggleClass('hide', logged);
+        } catch (e) {}
+    }
+    function uafixLoginWithNotice() {
+        Lampa.Noty.show('UAflix: вхід…');
+        uafixLogin(function (ok, why) { Lampa.Noty.show('UAflix: ' + (ok ? 'вхід виконано' : why), {time: ok ? 3000 : 8000}); uafixRefreshUI(); });
+    }
+    function uafixLogout() {
+        uafixClearCookie();
+        try { Lampa.Storage.set('anitube_uafix_pass', ''); Lampa.Storage.set('anitube_uafix_fail', 0); } catch (e) {}
+        try { $('.settings-param[data-name="anitube_uafix_pass"] .settings-param__value').text(''); } catch (e) {}
+        Lampa.Noty.show('UAflix: вихід виконано');
+        uafixRefreshUI();
+    }
     // Added to an error about a source that needs a Ukrainian address when the device can neither ask it itself nor use a box.
     function boxHint() {
         var android = !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'));
-        return boxAddress() || android ? '' : ' Без приставки UAflix можна дивитися через джерело UAFilms (чип «Джерело»).';
+        return boxAddress() || android ? '' : ' Без приставки UAflix можна дивитися через джерело UAFilms (чип «Джерело») або з власним безкоштовним акаунтом uafix.net: Налаштування → AniTube → «UAflix — акаунт».';
     }
     // The box is useful on a device with no native requests; Android Lampa asks the sites itself.
     function doramaAvailable() {
@@ -694,6 +755,11 @@
         return found;
     }
     function uafixPlayer(html) { return uafixPlayers(html)[0] || ''; }
+    function uafixHeaders() {
+        var headers = {'Referer': UAFIX + '/'}, cookie = uafixCookie();
+        if (cookie) headers.Cookie = cookie;
+        return headers;
+    }
     function zetPage(value) {
         try {
             var page = new URL(value);
@@ -702,9 +768,26 @@
     }
     function proxyUafix(action, value, success, failure) {
         var type = action === 'episode' ? 'json' : 'text';
-        function viaWorker(onError) {
-            ajaxRetry({url: homeUrl(homeProxy(), 'uf/' + action, action === 'search' ? 'q' : 'url', value), dataType: type,
-                timeout: 25000, cache: false, success: success, error: onError || failure});
+        function viaWorker(onError, renewed) {
+            uafixEnsureLogin(function () {
+                var cookie = uafixCookie();
+                // A stored cookie that stopped working (the page shows the sign-in form again, or an episode page has no player) is renewed once.
+                function renewable() { return cookie && !renewed && uafixCredentials(); }
+                function again() {
+                    uafixClearCookie();
+                    uafixLogin(function (ok) { if (ok) viaWorker(onError, true); else (onError || failure)(null, 'вхід в UAflix не вдався'); });
+                }
+                ajaxRetry({url: homeUrl(homeProxy(), 'uf/' + action, action === 'search' ? 'q' : 'url', value) + (cookie ? '&cookie=' + encodeURIComponent(cookie) : ''),
+                    dataType: type, timeout: 25000, cache: false,
+                    success: function (data) {
+                        if (renewable() && type === 'text' && /name=["']login_password["']/.test(String(data))) return again();
+                        success(data);
+                    },
+                    error: function (xhr, a, b) {
+                        if (renewable() && action === 'episode' && xhr && xhr.status === 424) return again();
+                        (onError || failure)(xhr, a, b);
+                    }});
+            });
         }
         // The home box goes first: it asks uafix from a Ukrainian address, which the Worker cannot.
         if (!boxAddress()) return viaWorker();
@@ -719,13 +802,13 @@
     function uafixGet(action, value, success, failure) {
         if (action !== 'search' && !uafixAnyPage(value)) return failure(null, 'некоректна адреса');
         var url = action === 'search' ? UAFIX + '/index.php?do=search&subaction=search&story=' + encodeURIComponent(value) : value;
-        direct(url, {dataType: 'text', headers: {'Referer': UAFIX + '/'}}, function (html) { success(String(html)); }, function (e) {
+        direct(url, {dataType: 'text', headers: uafixHeaders()}, function (html) { success(String(html)); }, function (e) {
             proxyUafix(action, value, success, function (xhr) { failure(xhr, reason(e)); });
         });
     }
     function uafixEpisodePlayer(url, success, failure) {
         if (!uafixAnyPage(url)) return failure('некоректна адреса');
-        direct(url, {dataType: 'text', headers: {'Referer': UAFIX + '/'}}, function (html) {
+        direct(url, {dataType: 'text', headers: uafixHeaders()}, function (html) {
             var players = uafixPlayers(html);
             if (players.length) success(players); else failure('на сторінці серії немає плеєра');
         }, function (e) {
@@ -889,8 +972,87 @@
         return seasons;
     }
 
-    // AnimeOn uses its own public API. The legacy aggregator below remains only for Makhno's TMDB mapping.
-    var ANIMEON_API = 'https://bbe.lme.isroot.in/api/v2';
+    // ---- Eneyida (eneyida.tv) and Klon UA (klonua.com): DLE catalogues whose title page embeds a public player ------------------
+    // Klon UA embeds Ashdi (read like any Ashdi page); Eneyida embeds HDVB, whose page states voices > seasons > episodes as plain JSON.
+    // Nothing of either player is run, no header is made up: Android Lampa asks the sites itself, a TV asks the owner's Worker.
+    var DLE_SITES = {
+        eneyida: {host: 'eneyida.tv', name: 'Eneyida', page: /^\/\d{1,8}-[a-z0-9-]+\.html$/i},
+        klon: {host: 'klonua.com', name: 'Klon UA', page: /^\/[a-z0-9-]+\/\d{1,8}-[a-z0-9-]+\.html$/i}
+    };
+    function dleOwn(site, value) {
+        try {
+            var url = new URL(value), rule = DLE_SITES[site];
+            return !!rule && url.protocol === 'https:' && url.hostname === rule.host && !url.port && !url.search && !url.hash && rule.page.test(url.pathname);
+        } catch (e) { return false; }
+    }
+    function hdvbEmbed(value) {
+        try {
+            var url = new URL(value);
+            return url.protocol === 'https:' && url.hostname === 'hdvbua.pro' && !url.port && !url.search && !url.hash && /^\/(?:embd|vid)\/\d{1,10}$/.test(url.pathname);
+        } catch (e) { return false; }
+    }
+    function dleGet(site, action, value, success, failure) {
+        var rule = DLE_SITES[site];
+        if (!rule) return failure(null, 'invalid_site');
+        if (action === 'search' && (!value || value.length > 200)) return failure(null, 'invalid_query');
+        if (action === 'page' && !dleOwn(site, value)) return failure(null, 'invalid_page');
+        if (action === 'player' && !hdvbEmbed(value)) return failure(null, 'invalid_player');
+        var address = action === 'search' ? 'https://' + rule.host + '/index.php?do=search&subaction=search&story=' + encodeURIComponent(value) : value;
+        function viaWorker(error) {
+            ajaxRetry({url: homeProxy() + '/dle/' + site + '/' + action + '?' + (action === 'search' ? 'q=' : 'url=') + encodeURIComponent(value) +
+                (homeKey() ? '&key=' + encodeURIComponent(homeKey()) : ''), dataType: 'text', timeout: 25000, cache: false, success: success, error: error || failure});
+        }
+        // Without a Referer: a search or a page needs none, and none is made up.
+        direct(address, {dataType: 'text', headers: {'Referer': ''}}, function (html) { success(String(html)); }, function () { viaWorker(); });
+    }
+    function dleCatalog(site, html) {
+        var doc = page(html), seen = {}, base = 'https://' + DLE_SITES[site].host + '/', eneyida = site === 'eneyida';
+        return list(doc, eneyida ? 'article.short' : '.short-news__small-card').map(function (card) {
+            var link = card.querySelector(eneyida ? 'a.short_title' : 'a.card-link__style');
+            if (!link) return null;
+            var url = absolute(link.getAttribute('href'), base);
+            var raw = text(eneyida ? link : card.querySelector('.card-link__text')).replace(/\s+/g, ' ').trim();
+            if (!dleOwn(site, url) || !raw || seen[url]) return null;
+            seen[url] = true;
+            var parts = raw.split(/\s+\/\s+/).map(function (part) { return part.trim(); }).filter(Boolean);
+            var info = text(card.querySelector(eneyida ? '.short_subtitle' : '.card-module__subscribe')).replace(/\s+/g, ' ').trim();
+            var year = (info.match(/\b(?:19|20)\d\d\b/) || [])[0] || '';
+            // Eneyida writes "2023 • Sôsô no Furîren": the original name follows the bullet.
+            var original = eneyida ? info.replace(/^\s*(?:19|20)\d\d\s*[\u2022&]*\s*(?:bull;)?\s*/, '').trim() : '';
+            var count = eneyida ? text(card.querySelector('.metaBottom')).replace(/\s+/g, ' ').trim() : '';
+            return {title: shortName(parts[0]), names: parts.concat(original ? [original] : []), url: url, year: year,
+                note: [year, count || (eneyida ? '' : info.replace(/,?\s*(?:19|20)\d\d\s*рік/, ''))].filter(Boolean).join(' · '), ref: {url: url}};
+        }).filter(Boolean);
+    }
+    // The first player of a title page that can be read: Ashdi (serial or film page) before HDVB.
+    function dlePlayers(html) {
+        var found = [], pattern = /\b(?:data-src|src)=["'](https:\/\/(?:ashdi\.vip\/(?:serial|vod)\/\d{1,10}(?=[?"'])|hdvbua\.pro\/(?:embd|vid)\/\d{1,10}(?=["'])))(?:\?[^"']*)?["']/gi, match; // HDVB's "?tr=1" iframe is a trailer: not matched
+        while ((match = pattern.exec(String(html)))) if (found.indexOf(match[1]) < 0) found.push(match[1]);
+        return found.sort(function (a, b) { return (/ashdi/.test(a) ? 0 : 1) - (/ashdi/.test(b) ? 0 : 1); });
+    }
+    // voices > seasons > episodes (or voices > files for a film) as {seasonNumber: [{label, episodes}]}.
+    function playlistSeasons(data) {
+        var films = (data || []).filter(function (entry) { return entry && entry.file && media(String(entry.file)); });
+        if (films.length && films.length === data.length) {
+            return {1: films.map(function (entry) {
+                return {label: String(entry.title || '').replace(/\s*\|\s*/g, ' · ').replace(/\s+/g, ' ').trim() || 'Відео',
+                    episodes: [{title: 'Фільм', url: String(entry.file), subs: subtitleList(entry.subtitle, 'ashdi.vip')}]};
+            })};
+        }
+        return voiceSeasons(data || []);
+    }
+    // HDVB player page: a quoted JSON string in "file: '[...]'" (a single quoted media address means one film).
+    function hdvbSeasons(html) {
+        var match = String(html).match(/\bfile\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/i);
+        if (!match) return {};
+        var value = jsString(match[1]);
+        if (media(value) && /^https:\/\/(?:s\d+\.)?hdvbua\.pro\//i.test(value)) return {1: [{label: 'Відео', episodes: [{title: 'Фільм', url: value, subs: []}]}]};
+        var data;
+        try { data = JSON.parse(value); } catch (e) { return {}; }
+        return Array.isArray(data) ? playlistSeasons(data) : {};
+    }
+
+    // AnimeOn uses its own public API (the old third-party aggregator is gone and is no longer used).
     // ---- UAFilms: a public catalogue (films.aartzz.pp.ua) that names, by the card's TMDB number, the players of one episode ------------
     // It is used only for that mapping: the Ashdi / zetvideo (UAflix) / Moon page is then read by the same code as everywhere else, and
     // the video comes straight from the hosting, not through UAFilms. Anonymous clients prove a small piece of work (SHA-256 with N
@@ -1018,19 +1180,7 @@
         }).filter(Boolean).sort(function (a, b) { return a.subs - b.subs; }); // the Ukrainian voices first, the subtitled original after them
     }
 
-    var SOURCE_NAMES = {anitube: 'AniTube', makhno: 'Makhno', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', dorama: 'DoramaUA', uaserials: 'UA Serials', anilibria: 'AniLibria (рос.)'};
-    function animeonCall(path, query, body, success, failure) {
-        var url = ANIMEON_API + path;
-        var settings = {url: url, dataType: 'json', timeout: 30000, cache: false, success: success, error: failure};
-        if (body) {
-            settings.type = 'POST';
-            settings.contentType = 'application/json';
-            settings.data = JSON.stringify(body);
-        } else {
-            settings.url = url + '?' + Object.keys(query).filter(function (k) { return query[k]; }).map(function (k) { return k + '=' + encodeURIComponent(query[k]); }).join('&');
-        }
-        $.ajax(settings);
-    }
+    var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', dorama: 'DoramaUA', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', anilibria: 'AniLibria (рос.)'};
     // Read the site's public API directly on Android, through the owner's Worker on TVs.
     function animeonApi(action, params, success, failure) {
         var paths = {search: '/anime?search=' + encodeURIComponent(params.q || ''),
@@ -1114,9 +1264,8 @@
         }, failure);
     }
 
-    // ---- Fourth source: Makhno = Ashdi's own catalogue, found by the card's TMDB number ----------------------------------
-    // The aggregator behind "Bandera Online" only tells which Ashdi page belongs to a TMDB/IMDb number. The page itself
-    // (ashdi.vip/serial/<id>) lists every voice with seasons and episodes as plain JSON, and is read here like the player pages.
+    // ---- Ashdi catalogue pages (ashdi.vip/serial/<id>, /vod/<id>): every voice with seasons and episodes as plain JSON ------------
+    // Read like the player pages. Used by Klon UA (the Makhno source, which found such a page through a third-party aggregator, was removed).
     function ashdiCatalogPage(value) {
         try {
             var page = new URL(value);
@@ -1143,7 +1292,7 @@
         } catch (e) { return []; }
     }
     // voices -> seasons -> episodes becomes {seasonNumber: [{label, episodes: [{title, url, subs}]}]}
-    function makhnoSeasons(data) {
+    function voiceSeasons(data) {
         var seasons = {};
         function episodesOf(items) {
             return (items || []).filter(function (e) { return e && e.file && media(String(e.file)); }).map(function (e) {
@@ -1306,7 +1455,9 @@
                 if (!shared.length) return;
                 var cardCoverage = shared.length / card.length, ownCoverage = shared.length / own.length;
                 var ok = (cardCoverage >= 0.5 && ownCoverage >= 0.5 && (shared.length >= 2 || shared[0].length >= 8)) ||
-                    (card.length === 1 && shared[0].length >= 5 && own.length <= 4);
+                    (card.length === 1 && shared[0].length >= 5 && own.length <= 4) ||
+                    // A one-word name that is the whole name on both sides ("Дюна" = "Дюна"): four letters are enough.
+                    (card.length === 1 && own.length === 1 && shared[0].length >= 4);
                 if (ok) best = Math.max(best, Math.min(cardCoverage, ownCoverage) * 10 + shared.length);
                 // One name entirely inside the other (the card's "Вигнаний важкоозброєний лицар" in a longer title with a subtitle) is a strong match too.
                 if ((shared.length === card.length && card.length >= 2) || (shared.length === own.length && own.length >= 2)) best = Math.max(best, 9 + shared.length);
@@ -1576,9 +1727,9 @@
         }
         var key = String(movie.id || movie.original_title || movie.title || '');
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
-        var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source;
+        var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source && !!SOURCE_NAMES[saved(key).source]; // a saved source that no longer exists (Makhno) is just forgotten
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
-        var ORDER = ['anitube', 'makhno', 'uafilms', 'animeon', 'uafix', 'dorama', 'uaserials', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'dorama', 'uaserials', 'eneyida', 'klon', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
         var playSeq = 0, launching = false;
         var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
         var playbackOwner = 'anitube-' + Date.now() + '-' + Math.random();
@@ -1643,7 +1794,7 @@
         // AniTube keeps every season on its own page, so TMDB's season is only matched by the number in the title (or "1" for the first one).
         function tmdbSeason() {
             if (!isTv || !movie.id || !item) return 0;
-            if (source === 'uafix' || source === 'makhno' || source === 'uafilms' || source === 'dorama' || source === 'uaserials') return season;
+            if (source === 'uafix' || source === 'uafilms' || source === 'dorama' || source === 'uaserials' || source === 'eneyida' || source === 'klon') return season;
             if (source === 'animeon') return seasonOf(item) || (item.ref && item.ref.season) || 0;
             return seasonOf(item) || (results.length <= 1 || results.indexOf(item) === 0 ? 1 : 0);
         }
@@ -1787,7 +1938,8 @@
                         {group: 'Фільми, серіали, дорами (укр)', title: 'UAFilms', subtitle: 'Ashdi, UAflix, Moon за номером TMDB', selected: source === 'uafilms', value: 'uafilms'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'UAflix', subtitle: 'Аніме, фільми, серіали, дорами', selected: source === 'uafix', value: 'uafix'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'UA Serials', subtitle: 'Фільми, серіали, дорами, аніме', selected: source === 'uaserials', value: 'uaserials'},
-                        {group: 'Фільми, серіали, дорами (укр)', title: 'Makhno', subtitle: 'Аніме, фільми, серіали', selected: source === 'makhno', value: 'makhno'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'Eneyida', subtitle: 'Фільми, серіали, аніме', selected: source === 'eneyida', value: 'eneyida'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'Klon UA', subtitle: 'Фільми, серіали, аніме', selected: source === 'klon', value: 'klon'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'DoramaUA', subtitle: 'Дорами', selected: source === 'dorama', value: 'dorama', box: true},
                         {group: 'Російські', title: 'AniLibria', subtitle: 'Аніме (рос)', selected: source === 'anilibria', value: 'anilibria', ru: true}
                     ]),
@@ -1841,14 +1993,14 @@
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
-            if (source === 'uafix' || source === 'makhno' || source === 'uafilms' || source === 'dorama' || source === 'uaserials') {
+            if (source === 'uafix' || source === 'uafilms' || source === 'dorama' || source === 'uaserials' || source === 'eneyida' || source === 'klon') {
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (numbers.length > 1) {
                     addRow(numbers.map(function (number) {
                         return chip('Сезон ' + number, '', number === season, function () {
                             if (number === season) return;
                             remember(key, {season: number});
-                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'makhno' || source === 'dorama' || source === 'uaserials') self.useMakhnoSeason(number); else self.useSeason(number);
+                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'dorama' || source === 'uaserials' || source === 'eneyida' || source === 'klon') self.useSourceSeason(number); else self.useSeason(number);
                         });
                     }));
                 }
@@ -1886,7 +2038,7 @@
             if (!voice) return;
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title, item.title);
-                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'makhno' || source === 'uafilms' || source === 'dorama' || source === 'uaserials' ? '#s' + season : '') + ':' + (info.number || info.original));
+                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'dorama' || source === 'uaserials' || source === 'eneyida' || source === 'klon' ? '#s' + season : '') + ':' + (info.number || info.original));
                 return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label, timeline: Lampa.Timeline.view(hash)};
             });
             entries = episodeOrder(entries, false).map(function (index) { return entries[index]; });
@@ -2136,6 +2288,18 @@
                     failed: function (xhr) { return 'UA Serials: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'UA Serials: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
+                eneyida: {
+                    label: 'Eneyida', verify: true, strict: true,
+                    fetch: function (q, ok, fail) { dleGet('eneyida', 'search', q, function (html) { ok(dleCatalog('eneyida', html)); }, fail); },
+                    failed: function (xhr) { return 'Eneyida: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    nothing: function (m) { return 'Eneyida: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
+                },
+                klon: {
+                    label: 'Klon UA', verify: true, strict: true,
+                    fetch: function (q, ok, fail) { dleGet('klon', 'search', q, function (html) { ok(dleCatalog('klon', html)); }, fail); },
+                    failed: function (xhr) { return 'Klon UA: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    nothing: function (m) { return 'Klon UA: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
+                },
                 anilibria: {
                     label: 'AniLibria', strict: true, words: true,
                     fetch: function (q, ok, fail) { anilibriaCall('/app/search/releases?query=' + encodeURIComponent(q), function (data) { ok(anilibriaCatalog(data)); }, fail); },
@@ -2146,7 +2310,6 @@
                     }
                 }
             };
-            if (source === 'makhno') return this.searchMakhno(queries);
             if (source === 'uafilms') return this.searchUafilms(queries);
             this.searchMany(specs[source]);
         };
@@ -2159,29 +2322,6 @@
             source = next;
             manual = manualFor(next);
             return true;
-        };
-
-        // Makhno finds the Ashdi page by the card's TMDB number (and IMDb number when the card has one), not by name.
-        this.searchMakhno = function (queries) {
-            var imdb = String(movie.imdb_id || '');
-            animeonCall('/search', {
-                sources: 'makhno', source: 'makhno', tmdb_id: movie.id,
-                imdb_id: /^tt\d+$/.test(imdb) ? imdb : '', serial: isTv ? 1 : 0
-            }, null, function (data) {
-                if (closed) return;
-                var found = ((data && data.items) || []).map(function (entry) {
-                    var play = String((entry && entry.ref && entry.ref.play) || '').split('?')[0];
-                    if (!ashdiCatalogPage(play)) return null;
-                    return {title: displayName() || 'Ashdi', url: 'makhno:' + play, note: 'Ashdi', ref: {play: play}};
-                }).filter(Boolean).slice(0, 1);
-                if (found.length) return self.found(found, queries);
-                if (self.nextSource()) return self.search(0);
-                self.empty('Makhno: за номером цієї картки нічого не знайдено. Спробуй інше джерело.');
-            }, function (xhr) {
-                if (closed) return;
-                if (self.nextSource()) return self.search(0);
-                self.empty('Makhno: сервер не відповів' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '. Ті самі озвучення Ashdi є в джерелі UAFilms (чип «Джерело»).');
-            });
         };
 
         // Picking another source starts the search again from the card's own names.
@@ -2242,10 +2382,10 @@
             this.loading(true);
             if (source === 'uafix') return this.openUafix();
             if (source === 'animeon') return this.openAnimeon();
-            if (source === 'makhno') return this.openMakhno();
             if (source === 'uafilms') return this.openUafilms();
             if (source === 'dorama') return this.openDorama();
             if (source === 'uaserials') return this.openUaserials();
+            if (source === 'eneyida' || source === 'klon') return this.openDle(source);
             if (source === 'anilibria') return this.openAnilibria();
             fetchPlaylist(item.url, function (data) {
                 if (closed || mine !== openSeq) return;
@@ -2294,27 +2434,7 @@
             });
         };
 
-        // The Ashdi page of the show: a serial page lists voices > seasons > episodes, a film page is one player.
-        this.openMakhno = function () {
-            var mine = openSeq;
-            var play = item.ref.play;
-            ashdiHtml(play, function (html) {
-                if (closed || mine !== openSeq) return;
-                if (ashdiMissing(html)) {
-                    if (self.nextSource()) return self.search(0);
-                    return self.empty('Makhno: Ashdi більше не має цього файлу. Спробуй інше джерело.');
-                }
-                if (/^\/serial\//.test(new URL(play).pathname)) seasons = makhnoSeasons(ashdiPlaylist(html));
-                else seasons = {1: [{label: 'Ashdi', episodes: [{title: 'Фільм', url: play, subs: []}]}]};
-                var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
-                if (!numbers.length) return self.empty('Makhno: на сторінці Ashdi немає серій.');
-                var wanted = saved(key).season;
-                self.useMakhnoSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
-            }, function (why) {
-                if (!closed && mine === openSeq) self.empty('Makhno: не вдалося прочитати сторінку Ashdi (' + reason(why) + ').');
-            });
-        };
-        this.useMakhnoSeason = function (number, fresh) {
+        this.useSourceSeason = function (number, fresh) {
             season = number;
             voices = seasons[number];
             var wantedVoice = saved(key).voice;
@@ -2369,7 +2489,7 @@
                             ref: {season: isTv ? number : 0, episode: n, variant: variant.key}, subtitles: []});
                         return {label: variant.label, player: variant.player, episodes: episodes};
                     });
-                    self.useMakhnoSeason(number, fresh);
+                    self.useSourceSeason(number, fresh);
                 });
             }, function (why) { fail('UAFilms: ' + why + '.'); });
         };
@@ -2401,12 +2521,43 @@
                     var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                     if (!numbers.length) return self.empty('DoramaUA: для цього тайтлу немає українських озвучок чи субтитрів' + (russianEnabled() ? '.' : ' (російські озвучки приховано: Налаштування → AniTube → Показувати російські джерела).'));
                     var wanted = saved(key).season;
-                    self.useMakhnoSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                    self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
                 }, function (why) {
                     if (!closed && mine === openSeq) self.empty('DoramaUA: не вдалося отримати список серій (' + why + ').');
                 });
             }, function (xhr) {
                 if (!closed && mine === openSeq) self.empty('DoramaUA: не вдалося отримати дані тайтлу' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
+            });
+        };
+
+        // Eneyida / Klon UA: the title page names its player (Ashdi or HDVB), whose page lists the voices, seasons and episodes.
+        this.openDle = function (site) {
+            var mine = openSeq, label = DLE_SITES[site].name;
+            function show(found) {
+                if (closed || mine !== openSeq) return;
+                seasons = found || {};
+                var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
+                if (!numbers.length) return self.empty(label + ': не вдалося прочитати список серій плеєра.');
+                var wanted = saved(key).season;
+                self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+            }
+            function failed(why) { if (!closed && mine === openSeq) self.empty(label + ': не вдалося прочитати плеєр (' + why + ').'); }
+            dleGet(site, 'page', item.url, function (html) {
+                if (closed || mine !== openSeq) return;
+                var player = dlePlayers(html)[0];
+                if (!player) return self.empty(label + ': на сторінці немає плеєра Ashdi чи HDVB, який можна відкрити.');
+                if (/^https:\/\/ashdi\.vip\//.test(player)) {
+                    ashdiHtml(player, function (page) {
+                        if (closed || mine !== openSeq) return;
+                        if (ashdiMissing(page)) return self.empty(label + ': Ashdi більше не має цього файлу.');
+                        var data = ashdiPlaylist(page);
+                        show(data.length ? playlistSeasons(data) : {1: [{label: 'Ashdi', episodes: [{title: /\/serial\//.test(player) ? 'Серія 1' : 'Фільм', url: player, subs: []}]}]});
+                    }, function (why) { failed(reason(why)); });
+                } else {
+                    dleGet(site, 'player', player, function (page) { show(hdvbSeasons(page)); }, function (xhr) { failed(xhr && xhr.status ? 'HTTP ' + xhr.status : 'немає відповіді'); });
+                }
+            }, function (xhr) {
+                if (!closed && mine === openSeq) self.empty(label + ': не вдалося відкрити сторінку тайтлу' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
         };
 
@@ -2422,7 +2573,7 @@
                     var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                     if (!numbers.length) return self.empty('UA Serials: не вдалося прочитати список серій плеєра.');
                     var wanted = saved(key).season;
-                    self.useMakhnoSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                    self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
                 }, function (xhr) {
                     if (!closed && mine === openSeq) self.empty('UA Serials: не вдалося прочитати плеєр' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
                 });
@@ -3387,6 +3538,30 @@
                 field: {name: 'Перевірити приставку', description: 'Показує, чи приставка відповідає і до яких сайтів вона дістається.'},
                 onChange: function () { boxCheck(); }
             });
+            Lampa.SettingsApi.addParam({component: 'anitube', param: {name: 'anitube_uafix_title', type: 'title'}, field: {name: 'UAflix — акаунт'}});
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_uafix_login', type: 'input', values: '', 'default': '', placeholder: 'логін'},
+                field: {name: 'Логін', description: 'Потрібен для серій UAflix на Samsung (Tizen), LG (webOS) і в браузері: без входу там лише трейлер. Реєстрація безкоштовна на uafix.net'},
+                onChange: function () { if (stored('anitube_uafix_login') && stored('anitube_uafix_pass')) uafixLoginWithNotice(); }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_uafix_pass', type: 'input', values: '', 'default': '', placeholder: 'пароль'},
+                field: {name: 'Пароль'},
+                onChange: function () { if (stored('anitube_uafix_login') && stored('anitube_uafix_pass')) uafixLoginWithNotice(); },
+                onRender: function (item) { item.toggleClass('hide', !!uafixCookie()); }
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_uafix_enter', type: 'button'},
+                field: {name: 'Увійти', description: 'Вхід не виконано'},
+                onRender: function (item) {
+                    item.find('.settings-param__name').text(uafixCookie() ? 'Вийти' : 'Увійти');
+                    item.find('.settings-param__descr').text(uafixStatus());
+                },
+                onChange: function () { if (uafixCookie()) uafixLogout(); else uafixLoginWithNotice(); }
+            });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
@@ -3447,7 +3622,7 @@
             type: 'video',
             version: VERSION,
             name: 'AniTube',
-            description: 'Озвучення, субтитри та серії з AniTube, Makhno, AnimeOn, UAflix і DoramaUA',
+            description: 'Озвучення, субтитри та серії з AniTube, AnimeOn, UAFilms, UAflix, Eneyida, Klon UA та інших',
             onContextMenu: function () {
                 return {name: 'AniTube', description: 'Актуальний пошук на anitube.in.ua'};
             },
