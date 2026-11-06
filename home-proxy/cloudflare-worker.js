@@ -22,10 +22,6 @@
 //                                       {ok, cookie}. uafix shows the player to a signed-in member from any country. Nothing is stored here;
 //                                       the three /uf routes above then accept &cookie=<that cookie> and pass it to uafix.net only.
 //
-// Third source, DoramaUA (its API at api.doramaua.tv is open to browsers, so only the player page needs this helper). The player page
-// (https://w.davidog.top/<id>?ep=<n>&track=<n>) lists the voices and holds the stream address in plain text; it sends no CORS header.
-//   GET /dorama/player?id=<n>&ep=<n>&track=<n>&key=<key>  that player page (HTML); ep and track are optional
-//
 // UA Serials catalogue and HDVB player pages (the HLS media remains a direct stream from the source).
 //   GET /uaserials/search?q=<text>&key=<key>   UA Serials search page (HTML)
 //   GET /uaserials/page?url=<page>&key=<key>   one UA Serials title page (HTML)
@@ -293,21 +289,6 @@ async function dleRoute(site, action, params) {
   return null;
 }
 
-const DORAMA_PLAYER = 'https://w.davidog.top';
-
-// The address is built here from three numbers, so no other path or host can be requested through it.
-async function doramaPlayer(params) {
-  const id = params.get('id') || '';
-  const ep = params.get('ep') || '';
-  const track = params.get('track') || '';
-  if (!/^\d{1,8}$/.test(id) || (ep && !/^\d{1,4}$/.test(ep)) || (track && !/^\d{1,6}$/.test(track))) return json({ error: 'invalid_player_page' }, 400);
-  const url = new URL('/' + id, DORAMA_PLAYER);
-  if (ep) url.searchParams.set('ep', ep);
-  if (track) url.searchParams.set('track', track);
-  const response = await fetch(url.href, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8' } });
-  return html(await read(response));
-}
-
 // Public Moon iframe pages only; no arbitrary proxy destinations or redirects.
 async function moonPage(raw) {
   let page;
@@ -467,7 +448,6 @@ export default {
         return player ? json({ player }) : json({ error: 'player_missing' }, UPSTREAM_STATUS);
       }
       if (url.pathname === '/uf/embed') return await ufEmbed(url.searchParams.get('url') || '');
-      if (url.pathname === '/dorama/player') return await doramaPlayer(url.searchParams);
       if (url.pathname === '/uaserials/search') return await uaserialsSearch((url.searchParams.get('q') || '').trim());
       if (url.pathname === '/uaserials/page') {
         const text = await uaserialsPage(url.searchParams.get('url') || '');
