@@ -8,6 +8,7 @@
 //   GET /playlist?url=<page>&key=<key> one AniTube show's playlist (JSON)
 //   GET /moon?url=<page>&key=<key>     a public moonanime.net/art iframe page
 //   GET /animeon?id=<episode>&key=<key>  the Ashdi page of one AnimeOn episode
+//   GET /dorama/player?id=<id>&ep=<episode>&track=<voice>&key=<key>  DoramaUA's public player page; media stays direct
 //   GET /embed?url=<page>&key=<key>    an Ashdi player page (https://ashdi.vip/vod/<id>) or show page (https://ashdi.vip/serial/<id>)
 //   POST /sync?key=<key>               the plugin's shared follow list ({code, items}); needs a KV namespace bound as SYNC
 //
@@ -414,6 +415,28 @@ async function followSync(request, env) {
   return json({ items: merged });
 }
 
+// A fixed destination, no cookies, Referer, browser impersonation, redirects or media relay.
+async function doramaPlayer(params) {
+  const id = params.get('id') || '', ep = params.get('ep') || '1', track = params.get('track') || '';
+  const season = params.get('season') || '', seasonParam = params.get('seasonParam') || '';
+  if (!/^[1-9]\d{0,7}$/.test(id) || !/^[1-9]\d{0,3}$/.test(ep) || (track && !/^[1-9]\d{0,5}$/.test(track)) ||
+      (season && !/^[1-9]\d{0,3}$/.test(season)) || (seasonParam && (!/^(season|s)$/.test(seasonParam) || !season))) {
+    return json({ error: 'invalid_dorama_player' }, 400);
+  }
+  const url = new URL('/' + id, 'https://w.davidog.top');
+  url.searchParams.set('ep', ep);
+  if (track) url.searchParams.set('track', track);
+  if (seasonParam) url.searchParams.set(seasonParam, season);
+  const text = await read(await fetch(url.href, {redirect: 'manual', headers: {
+    'User-Agent': USER_AGENT, 'Accept': 'text/html', 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8'
+  }}));
+  if (!/data-config\s*=/.test(text) && /не[\s\S]{0,15}доступно в вашем регионе|Змініть країну перегляду/i.test(text)) {
+    throw new UpstreamError('DoramaUA не пускає країну цього сервера');
+  }
+  if (!/\bid=["']inputData["']/.test(text) || !/data-config\s*=/.test(text)) throw new UpstreamError('DoramaUA не повернув сторінку плеєра');
+  return html(text);
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: HEADERS });
@@ -429,6 +452,7 @@ export default {
       if (url.pathname === '/playlist') return await playlist(url.searchParams.get('url') || '');
       if (url.pathname === '/moon') return await moonPage(url.searchParams.get('url') || '');
       if (url.pathname === '/animeon') return await animeonEpisode(url.searchParams.get('id') || '');
+      if (url.pathname === '/dorama/player') return await doramaPlayer(url.searchParams);
       if (['/animeon/search', '/animeon/translations', '/animeon/episodes'].includes(url.pathname)) return await animeonCatalogApi(url.pathname.split('/')[2], url.searchParams);
       if (url.pathname === '/embed') return await embed(url.searchParams.get('url') || '', env);
       if (url.pathname === '/uf/login') return await ufLogin(request, env);
