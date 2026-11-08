@@ -5,7 +5,7 @@ A Lampa plugin that adds an **AniTube** action with an SVG play icon to a card. 
 Current channels (8 November 2026):
 
 - Working **2.0.9**: `https://dez955.github.io/a.js`, pinned to the unchanged `old/anitube-2.0.9.js`.
-- Test beta **2.0.10** with DoramaUA: `https://dez955.github.io/anionline/anitube-beta.js?v=2.0.10`.
+- Test beta **2.0.11** with source visibility and faster saved-title opening: `https://dez955.github.io/anionline/anitube-beta.js?v=2.0.11`.
 - Legacy `anitube.js`: **1.8.19**, unchanged.
 
 Use one AniTube address at a time. DoramaUA on TVs requires the updated Cloudflare Worker; see [BETA.md](BETA.md).

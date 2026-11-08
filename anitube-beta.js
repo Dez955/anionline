@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.10';
+    var VERSION = '2.0.11';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1559,8 +1559,32 @@
             return value === true || value === 'true';
         } catch (e) { return false; }
     }
+    function sourceVisible(name) {
+        var hidden = Lampa.Storage.get('anitube_hidden_sources', []);
+        return !Array.isArray(hidden) || hidden.indexOf(name) < 0;
+    }
     function sourceAllowed(name) {
-        return !RUSSIAN_SOURCES[name] || russianEnabled();
+        return sourceVisible(name) && (!RUSSIAN_SOURCES[name] || russianEnabled());
+    }
+    function sourceSettings() {
+        var back = Lampa.Controller.enabled().name;
+        function show() {
+            Lampa.Select.show({title: 'Показати / сховати джерела',
+                items: Object.keys(SOURCE_NAMES).map(function (name) {
+                    return {title: SOURCE_NAMES[name], subtitle: sourceVisible(name) ? 'Показувати' : 'Приховано', value: name};
+                }),
+                onBack: function () { Lampa.Controller.toggle(back); },
+                onSelect: function (picked) {
+                    var hidden = Lampa.Storage.get('anitube_hidden_sources', []);
+                    hidden = Array.isArray(hidden) ? hidden.slice() : [];
+                    var index = hidden.indexOf(picked.value);
+                    if (index < 0) hidden.push(picked.value); else hidden.splice(index, 1);
+                    Lampa.Storage.set('anitube_hidden_sources', hidden);
+                    show();
+                }
+            });
+        }
+        show();
     }
 
     // A card that only has a Japanese name: AniList (public, free, open to any origin) turns it into the romaji and English titles, which
@@ -1767,9 +1791,10 @@
         }
         var key = String(movie.id || movie.original_title || movie.title || '');
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
-        var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source && !!SOURCE_NAMES[saved(key).source]; // a saved source that no longer exists (Makhno) is just forgotten
+        var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source && !!SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source); // a saved source that no longer exists (Makhno) is just forgotten
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
         var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        if (!sourceAllowed(source)) source = ORDER.filter(sourceAllowed)[0] || '';
         var playSeq = 0, launching = false;
         var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
         var playbackOwner = 'anitube-' + Date.now() + '-' + Math.random();
@@ -1843,7 +1868,8 @@
             if (tmdbCache[number]) return Promise.resolve(tmdbCache[number]);
             return new Promise(function (resolve) {
                 var done = false, fin = function (value) { if (!done) { done = true; resolve(value || {}); } };
-                setTimeout(function () { fin({}); }, 5000);
+                // Episode pictures/dates must not hold back the playable list; late metadata stays cached.
+                setTimeout(function () { fin({}); }, 500);
                 try {
                     Lampa.Api.seasons(movie, [number], function (data) {
                         var episodes = {}, count = 0;
@@ -1893,6 +1919,18 @@
             this.activity.loader(true);
             migrateQuery();
             manual = manualFor(source);
+            if (!source) {
+                self.empty('Усі джерела приховано. Увімкни потрібні: Налаштування → AniTube → Показати / сховати джерела.');
+                return this.render();
+            }
+            // The bell/followed card already supplied an exact title page: skip translations and a duplicate search.
+            var choice = saved(key);
+            if (source === 'anitube' && choice.source === 'anitube' && /^https:\/\/anitube\.in\.ua\/\d+-[^/?#]+\.html$/.test(choice.title || '')) {
+                var selected = {url: choice.title, title: choice.name || displayName(), matched: !!choice.name && titleScore([choice.name], fullNames(movie, []).map(nameWords).filter(function (n) { return n.length; })) > 0};
+                results = [selected];
+                self.openTitle(selected);
+                return this.render();
+            }
             // Other names of the card from two places at once (TMDB translations, AniList for a Japanese-only card), then the search starts.
             var gathered = [], waiting = 2;
             function got(index, list) {
@@ -2374,6 +2412,7 @@
 
         // Picking another source starts the search again from the card's own names.
         this.switchSource = function (name) {
+            if (!sourceAllowed(name)) return;
             playSeq++; launching = false;
             source = name;
             fellBack = true;
@@ -2872,7 +2911,7 @@
 
     // The source list is shown in groups, so a new source is one more line under the right heading instead of one more flat item.
     function sourceMenu(entries) {
-        var shown = entries.filter(function (entry) { return !entry.ru || russianEnabled(); });
+        var shown = entries.filter(function (entry) { return sourceAllowed(entry.value); });
         var menu = [], last = '';
         shown.forEach(function (entry) {
             if (entry.group !== last) { menu.push({title: entry.group, separator: true}); last = entry.group; }
@@ -3529,6 +3568,12 @@
         try {
             if (!Lampa.SettingsApi || Lampa.SettingsApi.getComponent && Lampa.SettingsApi.getComponent('anitube')) return;
             Lampa.SettingsApi.addComponent({component: 'anitube', icon: ICON, name: 'AniTube'});
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_sources', type: 'button'},
+                field: {name: 'Показати / сховати джерела', description: 'Вибери джерела для меню й автоматичного пошуку. Збережені вибори не видаляються.'},
+                onChange: sourceSettings
+            });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_version', type: 'button'},
