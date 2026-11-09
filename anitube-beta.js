@@ -1,11 +1,11 @@
-/* AniTube for Lampa. Sources: AniTube, UAFilms, AnimeOn, UAflix, UA Serials, Eneyida, Klon UA, DoramaUA, KinoPub, AniLibria. Series page laid out like the UAKino plugin's.
+/* ДубльUA (formerly AniTube) for Lampa. Sources: AniTube, UAFilms, AnimeOn, UAflix, UA Serials, Eneyida, Klon UA, DoramaUA, KinoPub, AniLibria. Series page laid out like the UAKino plugin's.
    No provider scripts are executed. */
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.15';
+    var VERSION = '2.0.16';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -541,11 +541,11 @@
         return 'приставка ' + host + ' не відповідає: перевір, що вона ввімкнена, в тій самій Wi-Fi і ретранслятор запущено';
     }
     function boxCheck() {
-        if (!boxAddress()) return Lampa.Noty.show('AniTube: адресу приставки не вказано (Налаштування → AniTube → Адреса приставки)', {time: 6000});
+        if (!boxAddress()) return Lampa.Noty.show('ДубльUA: адресу приставки не вказано (Налаштування → ДубльUA → Адреса приставки)', {time: 6000});
         boxRequest('check', {}, 'json', function (data) {
             var parts = ((data && data.results) || []).map(function (r) { return r.name + ': ' + (r.ok ? 'ок' : 'не працює (' + r.error + ')'); });
             Lampa.Noty.show('Приставка ' + boxAddress().replace(/^https?:\/\//i, '') + ' відповіла. ' + (parts.join('; ') || 'без деталей'), {time: 10000});
-        }, function (xhr) { Lampa.Noty.show('AniTube: ' + boxReason(xhr), {time: 8000}); });
+        }, function (xhr) { Lampa.Noty.show('ДубльUA: ' + boxReason(xhr), {time: 8000}); });
     }
     // ---- The member's own uafix.net account, kept the way the UAKino plugin keeps it -----------------------------------------------------
     // uafix shows a visitor from outside Ukraine only a trailer, but shows the player to a signed-in member. The login and password are typed
@@ -611,7 +611,7 @@
     // Added to an error about a source that needs a Ukrainian address when the device can neither ask it itself nor use a box.
     function boxHint() {
         var android = !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'));
-        return boxAddress() || android ? '' : ' Без приставки UAflix можна дивитися через джерело UAFilms (чип «Джерело») або з власним безкоштовним акаунтом uafix.net: Налаштування → AniTube → «UAflix — акаунт».';
+        return boxAddress() || android ? '' : ' Без приставки UAflix можна дивитися через джерело UAFilms (чип «Джерело») або з власним безкоштовним акаунтом uafix.net: Налаштування → ДубльUA → «UAflix — акаунт».';
     }
     // Lampa on Android can send native requests that are not limited by browser CORS rules.
     function direct(url, options, success, failure) {
@@ -675,6 +675,36 @@
             return {label: item[1].trim(), url: address};
         }).filter(Boolean);
     }
+    // Which languages a list of subtitle files [{label, url}] really covers. A voice is described by what its files say, not by its name:
+    // a track called "Субтитры (RU / UA)" is Russian only when it has no Ukrainian file.
+    function subtitleLanguages(list) {
+        var found = {ua: false, ru: false, en: false};
+        (list || []).forEach(function (item) {
+            var text = String((item && item.label) || '') + ' ' + String((item && item.url) || '').split('/').pop();
+            if (/україн|ukrain|(?:^|[^a-z])ua(?:[^a-z]|$)/i.test(text)) found.ua = true;
+            if (/росій|русск|russian|(?:^|[^a-z])ru(?:[^a-z]|$)/i.test(text)) found.ru = true;
+            if (/англ|english|(?:^|[^a-z])en(?:[^a-z]|$)/i.test(text)) found.en = true;
+        });
+        return found;
+    }
+    // "укр., рос." for the languages worth naming; Russian only while the Russian switch is on.
+    function languageNames(langs) {
+        var names = [];
+        if (langs && langs.ua) names.push('укр.');
+        if (langs && langs.ru && russianEnabled()) names.push('рос.');
+        if (langs && langs.en) names.push('англ.');
+        return names;
+    }
+    // What the files of a voice's first episodes say, for the voice list: ' · субтитри: укр., рос.' or ''.
+    function voiceSubtitleNote(voice) {
+        var langs = {ua: false, ru: false, en: false};
+        ((voice && voice.episodes) || []).slice(0, 3).forEach(function (episode) {
+            var found = subtitleLanguages(episode && episode.subs);
+            langs.ua = langs.ua || found.ua; langs.ru = langs.ru || found.ru; langs.en = langs.en || found.en;
+        });
+        var names = languageNames(langs);
+        return names.length ? ' · субтитри: ' + names.join(', ') : '';
+    }
     function ashdiMissing(html) { return String(html).indexOf('Файл не знайдено') !== -1; }
     function ashdiStream(url, success, failure) {
         function read(html, fail) {
@@ -689,7 +719,7 @@
             read(html, failure);
         }, function (e) {
             proxyEmbed(url, function (html) { read(html, failure); }, function (xhr) {
-                failure(homeProxy() ? failureText(xhr, reason(e)) : (e === 'не Android' ? 'на цьому пристрої потрібен домашній проксі (Налаштування → AniTube)' : e));
+                failure(homeProxy() ? failureText(xhr, reason(e)) : (e === 'не Android' ? 'на цьому пристрої потрібен домашній проксі (Налаштування → ДубльUA)' : e));
             });
         });
     }
@@ -1159,7 +1189,7 @@
         return {qualities: found, best: best};
     }
     // "[Українська]https://…vtt,[Русский]https://…": Ukrainian first; Russian only with the switch. Only .vtt/.srt on the site's own CDN.
-    function kinopubSubtitles(value) {
+    function kinopubSubtitles(value, all) {
         var ukrainian = [], other = [];
         String(value || '').split(',').forEach(function (part) {
             var item = part.match(/^\s*\[([^\]]+)\]\s*(https:\/\/\S+?)\s*$/), address;
@@ -1167,7 +1197,7 @@
             try { address = new URL(item[2]); } catch (e) { return; }
             if (!KINOPUB_CDN.test(address.hostname) || !/\.(vtt|srt)$/i.test(address.pathname)) return;
             var label = item[1].trim();
-            if (/русск|russian/i.test(label) && !russianEnabled()) return;
+            if (!all && /русск|russian/i.test(label) && !russianEnabled()) return;
             (/україн|ukrain/i.test(label) ? ukrainian : other).push({label: label, url: address.href});
         });
         return ukrainian.concat(other);
@@ -1241,6 +1271,49 @@
             entry.streamInfoUrl = found.qualities[found.best];
             success(found.qualities[found.best], kinopubSubtitles(reply.subtitle));
         }, function (xhr, why) { failure('KinoPub: ' + kinopubReason(xhr, why)); });
+    }
+    // "Оригінал + субтитри" is a claim of the site's name. The subtitle files the first episode really has decide what the voice is called.
+    var kinopubSubtitleCache = {}, KINOPUB_VERIFY_MS = 8000;
+    function kinopubOriginalLabel(langs) {
+        if (langs.ua) return 'Оригінал + субтитри (' + (langs.ru && russianEnabled() ? 'укр. + рос.' : 'укр.') + ')';
+        if (langs.en) return 'Оригінал + субтитри (англ.)';
+        if (langs.ru && russianEnabled()) return 'Оригінал + субтитри (рос.)';
+        return 'Оригінал, без субтитрів';
+    }
+    function kinopubVerify(pageUrl, seasons, done) {
+        var first = {}, order = [];
+        Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }).forEach(function (number) {
+            seasons[number].forEach(function (voice) {
+                var episode = voice.kind === 1 && voice.episodes[0];
+                if (episode && !first[episode.ref.tr]) { first[episode.ref.tr] = episode.ref; order.push(episode.ref.tr); }
+            });
+        });
+        order = order.slice(0, 3);
+        var finished = false, timer = null;
+        function apply(langsByTr) {
+            Object.keys(seasons).forEach(function (number) {
+                seasons[number].forEach(function (voice) {
+                    var episode = voice.kind === 1 && voice.episodes[0], langs = episode && langsByTr[episode.ref.tr];
+                    if (langs) voice.label = kinopubOriginalLabel(langs);
+                });
+            });
+        }
+        function finish(langsByTr) { if (finished) return; finished = true; clearTimeout(timer); apply(langsByTr || {}); done(); }
+        var known = {}, ask = [];
+        order.forEach(function (tr) { var cached = kinopubSubtitleCache[pageUrl + ':' + tr]; if (cached) known[tr] = cached; else ask.push(tr); });
+        if (!ask.length) return finish(known);
+        timer = setTimeout(function () { finish(known); }, KINOPUB_VERIFY_MS);
+        kinopubApi(pageUrl, ask.map(function (tr) {
+            var ref = first[tr];
+            return ref.film ? {action: 'get_movie', translator_id: tr, is_camrip: ref.camrip || '0', is_ads: ref.ads || '0', is_director: ref.director || '0'}
+                : {action: 'get_stream', translator_id: tr, season: ref.season, episode: ref.episode};
+        }), function (replies) {
+            ask.forEach(function (tr, index) {
+                var reply = replies[index];
+                if (reply && reply.success === true && reply.premium_content !== 1) known[tr] = kinopubSubtitleCache[pageUrl + ':' + tr] = subtitleLanguages(kinopubSubtitles(reply.subtitle, true));
+            });
+            finish(known);
+        }, function () { finish(known); });
     }
     function kinopubStale(entry) { return !!(entry && entry.ref && entry.ref.page && entry.streamAt && Date.now() - entry.streamAt > KINOPUB_STALE); }
     function kinopubMedia(value) {
@@ -1474,7 +1547,7 @@
         }
         direct(url, {dataType: 'text', headers: {'Referer': HOME}}, done, function (e) {
             proxyEmbed(url, done, function (xhr) {
-                failure(homeProxy() ? failureText(xhr, reason(e)) : (e === 'не Android' ? 'на цьому пристрої потрібен домашній проксі (Налаштування → AniTube)' : e));
+                failure(homeProxy() ? failureText(xhr, reason(e)) : (e === 'не Android' ? 'на цьому пристрої потрібен домашній проксі (Налаштування → ДубльUA)' : e));
             });
         });
     }
@@ -1570,14 +1643,17 @@
         var input = doc.querySelector('#inputData');
         return input && input.getAttribute('data-playlist') === String(id) ? input : null;
     }
+    // The name is only a first guess. A subtitle track is then checked against the files its player really has (doramaVerify):
+    // "probe" means it is checked, "tentative" means it is shown only if the check finds a Ukrainian file.
     function doramaVoice(name) {
-        var ua = /\(UA\)|укра[їи]н/i.test(name), subs = /субтитр|сабы|субтитри/i.test(name), auto = /авто/i.test(name);
+        var ua = /\(UA\)/i.test(name) || /(?:^|[^A-Za-z])UA(?:[^A-Za-z]|$)/.test(name) || /укра[їи]н/i.test(name), subs = /субтитр|сабы|субтитри/i.test(name), auto = /авто/i.test(name);
         if (/^Превью|^Оригинал/i.test(name) || /\((?:KG|EN|KR|JP|CN|PL|IL)\)/i.test(name)) return null;
-        if (ua) return {label: auto ? 'Автосубтитри (укр.)' : subs ? 'Субтитри (укр.)' : name, kind: auto ? 2 : subs ? 1 : 0};
+        if (ua) return {label: auto ? 'Автосубтитри (укр.)' : subs ? 'Субтитри (укр.)' : name, kind: auto ? 2 : subs ? 1 : 0, probe: subs || auto};
+        if (subs && !auto && !russianEnabled()) return {label: 'Субтитри', kind: 1, probe: true, tentative: true};
         if (!russianEnabled() || auto) return null;
-        return {label: subs ? 'Субтитри (рос.)' : name + ' (рос.)', kind: 3};
+        return {label: subs ? 'Субтитри (рос.)' : name + ' (рос.)', kind: 3, probe: subs};
     }
-    function doramaSeasons(html, id) {
+    function doramaSeasons(html, id, keepTentative) {
         var input = doramaInput(page(html), id), playlist, seasons = {};
         if (!input) return seasons;
         try { playlist = JSON.parse(input.textContent); } catch (e) { return seasons; }
@@ -1595,9 +1671,9 @@
                     if (!entry || !/^[1-9]\d{0,5}$/.test(String(entry.voice_id)) ||
                         (entry.season != null && String(entry.season) !== s) || (entry.episode != null && String(entry.episode) !== ep)) return;
                     var name = String(entry.voice_name || '').replace(/\s+/g, ' ').trim(), info = name && doramaVoice(name);
-                    if (!info) return;
+                    if (!info || (info.tentative && !keepTentative)) return;
                     var voice = byVoice[entry.voice_id];
-                    if (!voice) { voice = byVoice[entry.voice_id] = {label: info.label, kind: info.kind, episodes: []}; order.push(voice); }
+                    if (!voice) { voice = byVoice[entry.voice_id] = {label: info.label, kind: info.kind, episodes: [], track: String(entry.voice_id), probe: !!info.probe, tentative: !!info.tentative}; order.push(voice); }
                     if (voice.episodes.some(function (e) { return e.ref.ep === +ep; })) return;
                     voice.episodes.push({title: 'Серія ' + ep, url: 'dorama:' + id + ':' + s + ':' + ep + ':' + entry.voice_id,
                         ref: {id: id, season: +s, seasonParam: seasonParam, ep: +ep, track: String(entry.voice_id)}});
@@ -1632,6 +1708,61 @@
             });
             success(stream, subtitles);
         }, failure);
+    }
+
+    // Which subtitle files a DoramaUA player page really offers (the page lists them as data-ua_subtitle / data-ru_subtitle / data-en_subtitle).
+    function doramaSubtitleFiles(html) {
+        var node = page(html).querySelector('[data-config]'), found = {ua: false, ru: false, en: false};
+        if (!node) return found;
+        ['ua', 'ru', 'en'].forEach(function (lang) { found[lang] = !!doramaMedia(node.getAttribute('data-' + lang + '_subtitle') || '', true); });
+        return found;
+    }
+    var doramaSubtitleCache = {};
+    // Subtitle tracks are labelled by what their first episode really has, not by their name. A track whose files cannot be read keeps its name's
+    // guess (or stays hidden when it was only a guess). Waits at most DORAMA_VERIFY_MS, then shows what it has; late answers are kept for next time.
+    var DORAMA_VERIFY_MS = 8000;
+    function doramaVerify(seasons, id, done) {
+        var first = {}, tracks = [];
+        Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }).forEach(function (number) {
+            seasons[number].forEach(function (voice) {
+                if (voice.probe && voice.episodes.length && !first[voice.track]) { first[voice.track] = voice.episodes[0].ref; tracks.push(voice.track); }
+            });
+        });
+        tracks = tracks.slice(0, 4);
+        var results = {}, pending = tracks.length, finished = false, timer = null;
+        function apply() {
+            Object.keys(seasons).forEach(function (number) {
+                seasons[number] = seasons[number].filter(function (voice) {
+                    if (!voice.probe) return true;
+                    var files = results[voice.track];
+                    // Files that exist decide: another language without a Ukrainian file means the name was wrong (the track is offered as Russian when
+                    // that is wanted). No file at all proves nothing (subtitles may be burned into the video), so the name's guess stays.
+                    if (files && (files.ua || files.ru || files.en)) {
+                        if (files.ua) {
+                            voice.label = voice.kind === 2 ? 'Автосубтитри (укр.)' : 'Субтитри (' + (files.ru && russianEnabled() ? 'укр. + рос.' : 'укр.') + ')';
+                            voice.kind = voice.kind === 2 ? 2 : 1;
+                        } else if (files.ru && russianEnabled() && voice.kind !== 2) {
+                            voice.label = 'Субтитри (рос.)'; voice.kind = 3;
+                        } else return false;
+                        voice.tentative = false;
+                    }
+                    return !voice.tentative;
+                });
+                seasons[number].sort(function (a, b) { return a.kind - b.kind; });
+                if (!seasons[number].length) delete seasons[number];
+            });
+        }
+        function finish() { if (finished) return; finished = true; clearTimeout(timer); apply(); done(); }
+        if (!pending) return finish();
+        timer = setTimeout(finish, DORAMA_VERIFY_MS);
+        tracks.forEach(function (track) {
+            var cached = doramaSubtitleCache[id + ':' + track];
+            if (cached) { results[track] = cached; if (--pending === 0) finish(); return; }
+            doramaPlayerPage(first[track], function (html) {
+                results[track] = doramaSubtitleCache[id + ':' + track] = doramaSubtitleFiles(html);
+                if (--pending === 0) finish();
+            }, function () { results[track] = null; if (--pending === 0) finish(); });
+        });
     }
 
     // Other names of the card from TMDB (Ukrainian, English): a card shown with its Japanese name can still be found.
@@ -1821,7 +1952,7 @@
             if (said) status += ' – ' + String(said).slice(0, 80);
         } catch (e) {}
         var hint = '';
-        if (!home && !(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'))) hint = ' На цьому пристрої потрібен домашній проксі: Налаштування → AniTube.';
+        if (!home && !(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'))) hint = ' На цьому пристрої потрібен домашній проксі: Налаштування → ДубльUA.';
         else if (home && /^http:/i.test(home) && window.location && window.location.protocol === 'https:') hint = ' Lampa відкрита через https, тож браузер блокує http-проксі.';
         var note = (xhr && xhr.boxNote) || boxNote;
         return '(' + (note ? note + '; ' : '') + 'напряму: ' + directReason + '; ' + status + ')' + hint;
@@ -1931,7 +2062,7 @@
         if (work.anitube_version_shown) { delete work.anitube_version_shown; return; }
         if (versionNoticeShown) return;
         versionNoticeShown = true;
-        Lampa.Noty.show('AniTube v' + VERSION + (work.title ? ' · ' + work.title : ''));
+        Lampa.Noty.show('ДубльUA v' + VERSION + (work.title ? ' · ' + work.title : ''));
     }
 
     // Indices only: the caller's entries and progress objects are never reordered in place.
@@ -2120,7 +2251,7 @@
             migrateQuery();
             manual = manualFor(source);
             if (!source) {
-                self.empty('Усі джерела приховано. Увімкни потрібні: Налаштування → AniTube → Показати / сховати джерела.');
+                self.empty('Усі джерела приховано. Увімкни потрібні: Налаштування → ДубльUA → Показати / сховати джерела.');
                 return this.render();
             }
             // The bell/followed card already supplied an exact title page: skip translations and a duplicate search.
@@ -2158,7 +2289,7 @@
             rows = [];
             var voice = voices[voiceIndex];
             var head = $('<div class="atp__head"><div class="atp__title"></div><div class="atp__meta"></div></div>');
-            head.find('.atp__title').text(item ? item.title : (movie.title || movie.name || 'AniTube'));
+            head.find('.atp__title').text(item ? item.title : (movie.title || movie.name || 'ДубльUA'));
             var meta = [];
             if (voice) meta.push(voice.episodes.length + ' ' + plural(voice.episodes.length, 'серія', 'серії', 'серій'));
             if (results.length > 1) meta.push(results.length + ' ' + plural(results.length, 'варіант', 'варіанти', 'варіантів') + ' на ' + SOURCE_NAMES[source]);
@@ -2179,7 +2310,7 @@
                         title: 'Озвучення / субтитри',
                         items: voices.filter(function (v, index) { return voices.findIndex(function (x) { return x.label === v.label; }) === index; }).map(function (v) {
                             var opens = voiceFor(v.label);
-                            return {title: v.label, subtitle: 'Серій: ' + voices[opens].episodes.length, selected: v.label === voice.label, index: opens};
+                            return {title: v.label, subtitle: 'Серій: ' + voices[opens].episodes.length + voiceSubtitleNote(voices[opens]), selected: v.label === voice.label, index: opens};
                         }),
                         onBack: function () { Lampa.Controller.toggle('content'); },
                         onSelect: function (picked) {
@@ -2862,10 +2993,13 @@
                 if (closed || mine !== openSeq || source !== 'kinopub') return;
                 seasons = found || {};
                 Object.keys(seasons).forEach(function (s) { seasons[s].sort(function (a, b) { return a.kind - b.kind; }); });
-                var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
-                if (!numbers.length) return fail('не вдалося прочитати список серій.');
-                var wanted = saved(key).season;
-                self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                if (!Object.keys(seasons).length) return fail('не вдалося прочитати список серій.');
+                kinopubVerify(item.url, seasons, function () {
+                    if (closed || mine !== openSeq || source !== 'kinopub') return;
+                    var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
+                    var wanted = saved(key).season;
+                    self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                });
             }
             kinopubPageGet(item.url, function (html) {
                 if (closed || mine !== openSeq || source !== 'kinopub') return;
@@ -2889,11 +3023,14 @@
                 if (!/^[1-9]\d{0,7}$/.test(String(id))) return self.empty('DoramaUA: у цього тайтлу немає плеєра.');
                 doramaPlayerPage({id: id, ep: 1}, function (html) {
                     if (closed || mine !== openSeq || source !== 'dorama') return;
-                    seasons = doramaSeasons(html, id);
-                    var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
-                    if (!numbers.length) return self.empty('DoramaUA: не знайдено доступних українських озвучень чи субтитрів у списку плеєра.');
-                    var wanted = saved(key).season;
-                    self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                    seasons = doramaSeasons(html, id, true);
+                    doramaVerify(seasons, id, function () {
+                        if (closed || mine !== openSeq || source !== 'dorama') return;
+                        var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
+                        if (!numbers.length) return self.empty('DoramaUA: не знайдено доступних українських озвучень чи субтитрів у списку плеєра.');
+                        var wanted = saved(key).season;
+                        self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
+                    });
                 }, function (why) {
                     if (!closed && mine === openSeq && source === 'dorama') self.empty('DoramaUA: не вдалося отримати список серій (' + why + ').');
                 });
@@ -3020,15 +3157,15 @@
             if (closed) return;
             var entry = entries[index];
             if (!entry || entry.loading) return;
-            if (entry.supported === false) return Lampa.Noty.show('AniTube: плеєр ' + entry.player + ' поки не підтримується. Обери інший плеєр угорі.');
+            if (entry.supported === false) return Lampa.Noty.show('ДубльUA: плеєр ' + entry.player + ' поки не підтримується. Обери інший плеєр угорі.');
             var mine = openSeq, playingToken = token, request = ++playSeq;
             entry.loading = true; launching = true;
             self.activity.loader(true);
             var slowNote = source === 'uafilms' && !entry.stream ? 'UAFilms шукає серію, вперше це може тривати до 30 секунд' : '';
             if (!versionNoticeShown) {
                 versionNoticeShown = true;
-                Lampa.Noty.show('AniTube v' + VERSION + ' · ' + entry.info.label + (slowNote ? ' · ' + slowNote : ''));
-            } else if (slowNote) Lampa.Noty.show('AniTube: ' + slowNote);
+                Lampa.Noty.show('ДубльUA v' + VERSION + ' · ' + entry.info.label + (slowNote ? ' · ' + slowNote : ''));
+            } else if (slowNote) Lampa.Noty.show('ДубльUA: ' + slowNote);
             // Lampa's external (Android) player is handed only playlist items whose url is a plain string, so lazy
             // links would be dropped and "next" would do nothing. Resolve a window around this episode up front;
             // the rest stays lazy for Lampa's built-in player.
@@ -3158,7 +3295,7 @@
     }
     function open(movie, options) {
         Lampa.Component.add(COMPONENT, component);
-        Lampa.Activity.push({url: '', title: 'AniTube', component: COMPONENT, movie: movie || {}, page: 1, follow: !!(options && options.follow)});
+        Lampa.Activity.push({url: '', title: 'ДубльUA', component: COMPONENT, movie: movie || {}, page: 1, follow: !!(options && options.follow)});
     }
 
     // ---- Following: an "AniTube" tab in Lampa's bell for new subtitle / voice-over episodes of starred titles ------------
@@ -3240,7 +3377,7 @@
         try {
             if (!window.Lampa || !Lampa.Notice || !Lampa.NoticeClassLampa || !Lampa.Notice.classes) return false;
             if (!Lampa.Notice.classes.anitube) {
-                Lampa.Notice.addClass('anitube', new Lampa.NoticeClassLampa({name: 'AniTube', db_name: 'anitube_notice'}));
+                Lampa.Notice.addClass('anitube', new Lampa.NoticeClassLampa({name: 'ДубльUA', db_name: 'anitube_notice'}));
                 Lampa.Notice.listener.follow('select', function (e) {
                     if (!e || e.display !== 'anitube' || !e.element) return;
                     var card = e.element.anitube_card;
@@ -3289,7 +3426,7 @@
         if (noticeReady()) {
             Lampa.Notice.pushNotice('anitube', element, function () { done(true); }, function (why) { done(/already/i.test(String(why))); });
         } else {
-            try { Lampa.Noty.show('AniTube: ' + element.title + ' · ' + element.text + ' · ' + element.labels[0], {time: 8000}); } catch (e) {}
+            try { Lampa.Noty.show('ДубльUA: ' + element.title + ' · ' + element.text + ' · ' + element.labels[0], {time: 8000}); } catch (e) {}
             done(true);
         }
     }
@@ -3468,13 +3605,13 @@
         var all = followAll(), id = String(movie.id);
         if (!item || !item.url) {
             if (all[id]) return;
-            var own = movie.title || movie.name || movie.original_title || movie.original_name || 'AniTube';
+            var own = movie.title || movie.name || movie.original_title || movie.original_name || 'ДубльUA';
             all[id] = {id: id, url: '', title: own, mode: followMode(), added: Date.now(), total: 0, card: followCard(movie), next: 0, t: Date.now()};
             followSave(all);
             followGoneClear(id);
             followSyncSoon();
             followChanged();
-            Lampa.Noty.show('AniTube: стежу за «' + own + '»');
+            Lampa.Noty.show('ДубльUA: стежу за «' + own + '»');
             setTimeout(followRun, 1500);
             return;
         }
@@ -3488,7 +3625,7 @@
         followGoneClear(id);
         followSyncSoon();
         followChanged();
-        Lampa.Noty.show('AniTube: стежу за «' + item.title + '»');
+        Lampa.Noty.show('ДубльUA: стежу за «' + item.title + '»');
         setTimeout(followRun, 1500);
     }
     function followRemove(id) {
@@ -3501,7 +3638,7 @@
         followGoneSave(gone);
         followChanged();
         followSyncSoon();
-        Lampa.Noty.show('AniTube: більше не стежу');
+        Lampa.Noty.show('ДубльUA: більше не стежу');
     }
     // A title in the list that is not written in Ukrainian (the card's Japanese name, kept when AniTube did not answer at the moment of adding):
     // AniTube is searched with the card's names and the followed page's own title is taken. Tried at most once in six hours.
@@ -3587,7 +3724,7 @@
             var moved = !mine || (r.url || '') !== (mine.url || '');
             if (mine && mine.url && moved) delete record.seen;
             if (!mine) added++;
-            all[id] = Object.assign(record, {id: id, url: r.url || '', title: r.title || record.title || 'AniTube', mode: FOLLOW_MODES[r.mode] ? r.mode : 'any',
+            all[id] = Object.assign(record, {id: id, url: r.url || '', title: r.title || record.title || 'ДубльUA', mode: FOLLOW_MODES[r.mode] ? r.mode : 'any',
                 card: r.card && typeof r.card === 'object' ? r.card : (record.card || {}), total: +r.total || 0, t: entry.t});
             if (moved) all[id].next = 0;
             delete gone[id];
@@ -3607,7 +3744,7 @@
     function followSync(manual) {
         var code = syncCode();
         if (!code) {
-            if (manual) Lampa.Noty.show('AniTube: синхронізація вимкнена. Введи код від 6 латинських літер, цифр чи дефісів.');
+            if (manual) Lampa.Noty.show('ДубльUA: синхронізація вимкнена. Введи код від 6 латинських літер, цифр чи дефісів.');
             return;
         }
         if (syncBusy) { syncAgain = true; return; }
@@ -3617,7 +3754,7 @@
         Object.keys(gone).forEach(function (id) { if (!items[id] || gone[id] > items[id].t) items[id] = {t: gone[id], del: true}; });
         function finish(ok, added, xhr) {
             syncBusy = false;
-            if (manual) Lampa.Noty.show(ok ? 'AniTube: стеження синхронізовано, у списку ' + Object.keys(followAll()).length : 'AniTube: синхронізація не вдалася (' + syncFailure(xhr) + ')');
+            if (manual) Lampa.Noty.show(ok ? 'ДубльUA: стеження синхронізовано, у списку ' + Object.keys(followAll()).length : 'ДубльUA: синхронізація не вдалася (' + syncFailure(xhr) + ')');
             if (added) setTimeout(followRun, 1500);
             if (syncAgain) { syncAgain = false; followSyncSoon(); }
         }
@@ -3648,17 +3785,17 @@
         // The AniTube list is for anime only; series have Lampa's own bell on the card, films have nothing to follow.
         if (!looksLikeAnime(movie)) {
             var serial = movie.number_of_seasons || movie.name || movie.first_air_date;
-            return Lampa.Noty.show('AniTube стежить лише за аніме.' + (serial ? ' Для серіалів є дзвіночок Lampa на цій картці.' : ''));
+            return Lampa.Noty.show('ДубльUA стежить лише за аніме.' + (serial ? ' Для серіалів є дзвіночок Lampa на цій картці.' : ''));
         }
         var all = Lampa.Storage.get('anitube_choice', '{}'), choice = (all && all[String(movie.id)]) || {};
         if ((!choice.source || choice.source === 'anitube') && /^https:\/\/anitube\.in\.ua\//.test(choice.title || '')) {
-            return followAdd(movie, {url: choice.title, title: choice.name || movie.title || movie.name || 'AniTube', note: ''});
+            return followAdd(movie, {url: choice.title, title: choice.name || movie.title || movie.name || 'ДубльUA', note: ''});
         }
         // Not opened before: the title is looked up on AniTube in the background and added; the screen is never opened for it.
         // A series AniTube does not have (or the site not answering) still goes into the list, and the plugin looks for it again later.
         if (followLooking[movie.id]) return;
         followLooking[movie.id] = true;
-        Lampa.Noty.show('AniTube: додаю до списку…');
+        Lampa.Noty.show('ДубльUA: додаю до списку…');
         followResolve(movie, function (found) {
             delete followLooking[movie.id];
             if (found.pick) return followAdd(movie, found.pick);
@@ -3723,7 +3860,7 @@
     }
     function followList() {
         var all = followAll(), ids = Object.keys(all), back = Lampa.Controller.enabled().name;
-        if (!ids.length) return Lampa.Noty.show('AniTube: список стеження порожній. Натисни зірочку на картці аніме.');
+        if (!ids.length) return Lampa.Noty.show('ДубльUA: список стеження порожній. Натисни зірочку на картці аніме.');
         Lampa.Select.show({
             title: 'Мої стеження (' + ids.length + ')',
             items: ids.map(function (id) { return {title: all[id].title, subtitle: followCounts(all[id]), id: id}; }),
@@ -3804,7 +3941,7 @@
     function addSettings() {
         try {
             if (!Lampa.SettingsApi || Lampa.SettingsApi.getComponent && Lampa.SettingsApi.getComponent('anitube')) return;
-            Lampa.SettingsApi.addComponent({component: 'anitube', icon: ICON, name: 'AniTube'});
+            Lampa.SettingsApi.addComponent({component: 'anitube', icon: ICON, name: 'ДубльUA'});
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_sources', type: 'button'},
@@ -3814,8 +3951,8 @@
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_version', type: 'button'},
-                field: {name: 'Версія ' + VERSION, description: 'Фактично завантажена версія AniTube.'},
-                onChange: function () { Lampa.Noty.show('AniTube v' + VERSION); }
+                field: {name: 'Версія ' + VERSION, description: 'Фактично завантажена версія ДубльUA.'},
+                onChange: function () { Lampa.Noty.show('ДубльUA v' + VERSION); }
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
@@ -3856,7 +3993,7 @@
                 field: {name: 'Забути запам\'ятовані вибори', description: 'Ручні назви пошуку, вибраний тайтл, озвучення й джерело для всіх карток. Пошук почнеться з нуля.'},
                 onChange: function () {
                     Lampa.Storage.set('anitube_choice', {});
-                    Lampa.Noty.show('AniTube: збережені вибори скинуто');
+                    Lampa.Noty.show('ДубльUA: збережені вибори скинуто');
                 }
             });
             Lampa.SettingsApi.addParam({
@@ -3912,7 +4049,7 @@
         var movie = event.data && event.data.movie;
         if (!movie || root.find('.anitube-card-button').length) return;
 
-        var button = $('<div class="full-start__button selector view--anitube anitube-card-button">' + ICON + '<span>AniTube</span></div>');
+        var button = $('<div class="full-start__button selector view--anitube anitube-card-button">' + ICON + '<span>ДубльUA</span></div>');
         button.on('hover:enter', function () { open(movie); });
 
         // Match established Lampa online plugins: attach to the card's torrent button.
@@ -3953,10 +4090,10 @@
         Lampa.Manifest.plugins = {
             type: 'video',
             version: VERSION,
-            name: 'AniTube',
-            description: 'Озвучення, субтитри та серії з AniTube, AnimeOn, UAFilms, UAflix, Eneyida, Klon UA та інших',
+            name: 'ДубльUA',
+            description: 'Українські озвучення, субтитри та серії з AniTube, AnimeOn, UAFilms, UAflix, Eneyida, Klon UA та інших',
             onContextMenu: function () {
-                return {name: 'AniTube', description: 'Актуальний пошук на anitube.in.ua'};
+                return {name: 'ДубльUA', description: 'Пошук озвучень і субтитрів у кількох джерелах'};
             },
             onContextLauch: function (movie) {
                 open(movie);
