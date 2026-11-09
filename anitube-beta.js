@@ -1,11 +1,11 @@
 /* AniTube for Lampa. Sources: AniTube, UAFilms, AnimeOn, UAflix, UA Serials, Eneyida, Klon UA, DoramaUA, AniLibria. Series page laid out like the UAKino plugin's.
-   No provider scripts are executed. */
+   Provider scripts are not executed except in the explicitly enabled DoramaUA beta player. */
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.11';
+    var VERSION = '2.0.12';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1313,6 +1313,7 @@
     // DoramaUA's public API and the plain JSON/HTML configuration of its player. No provider JavaScript is run.
     var DORAMA_API = 'https://api.doramaua.tv/api/v2';
     var DORAMA_PLAYER = 'https://w.davidog.top';
+    var doramaFrameOpen = false;
     function doramaApi(path, success, failure) {
         ajaxRetry({url: DORAMA_API + path, dataType: 'json', timeout: 20000, cache: false, success: success, error: failure});
     }
@@ -1372,6 +1373,9 @@
     }
     function doramaVoice(name) {
         var ua = /\(UA\)|укра[їи]н/i.test(name), subs = /субтитр|сабы|субтитри/i.test(name), auto = /авто/i.test(name);
+        // Some subtitle tracks contain both languages, e.g. "Субтитры (RU / UA)".
+        // They must remain visible when Russian audio is disabled; the actual subtitle files are filtered separately.
+        if (subs && /\([^)]*\bUA\b[^)]*\)/i.test(name)) ua = true;
         if (/^Превью|^Оригинал/i.test(name) || /\((?:KG|EN|KR|JP|CN|PL|IL)\)/i.test(name)) return null;
         if (ua) return {label: auto ? 'Автосубтитри (укр.)' : subs ? 'Субтитри (укр.)' : name, kind: auto ? 2 : subs ? 1 : 0};
         if (!russianEnabled() || auto) return null;
@@ -2652,6 +2656,11 @@
                 if (!data || !data.serial || data.serial.slug !== item.ref.slug) return self.empty('DoramaUA повернув інший тайтл. Спробуй повторити пошук.');
                 var id = data && data.serial && data.serial.page_player;
                 if (!/^[1-9]\d{0,7}$/.test(String(id))) return self.empty('DoramaUA: у цього тайтлу немає плеєра.');
+                var directPlayer = Lampa.Storage.field('anitube_dorama_direct');
+                if (tvPlatform() && (directPlayer === true || directPlayer === 'true')) {
+                    self.loading(false);
+                    return self.openDoramaFrame(id);
+                }
                 doramaPlayerPage({id: id, ep: 1}, function (html) {
                     if (closed || mine !== openSeq || source !== 'dorama') return;
                     seasons = doramaSeasons(html, id);
@@ -2665,6 +2674,29 @@
             }, function (xhr) {
                 if (!closed && mine === openSeq && source === 'dorama') self.empty('DoramaUA: не вдалося отримати дані тайтлу' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.');
             });
+        };
+
+        // Explicit beta opt-in: the site's own player runs in an iframe on the TV's connection.
+        // It is selected before any Worker request, not used to retry an access refusal.
+        this.openDoramaFrame = function (id) {
+            if (!/^[1-9]\d{0,7}$/.test(String(id))) return;
+            var frame = $('<div class="atp-dorama-frame"><div class="atp-dorama-frame__bar"><div class="atp-dorama-frame__back selector">← Назад до AniTube</div><span>Тест: плеєр DoramaUA · серії й озвучення вибираються на сайті</span></div><iframe title="Плеєр DoramaUA" allow="fullscreen; autoplay" allowfullscreen sandbox="allow-scripts allow-same-origin allow-forms" tabindex="0"></iframe></div>');
+            var player = frame.find('iframe');
+            player.attr('src', DORAMA_PLAYER + '/' + id + '?ep=1');
+            function close() {
+                doramaFrameOpen = false;
+                player.attr('src', 'about:blank');
+                frame.remove();
+                self.back();
+            }
+            frame.find('.atp-dorama-frame__back').on('hover:enter', close).on('click', close);
+            html.append(frame);
+            doramaFrameOpen = true;
+            Lampa.Controller.add('anitube_dorama_frame', {
+                toggle: function () { try { player[0].focus(); } catch (e) {} },
+                back: close
+            });
+            Lampa.Controller.toggle('anitube_dorama_frame');
         };
 
         // One AnimeOn season: its Ashdi voices become the voices of the screen, in the order the server lists them.
@@ -2897,6 +2929,7 @@
         this.stop = function () {};
         this.destroy = function () {
             closed = true;
+            doramaFrameOpen = false;
             if (moonWatchStop) moonWatchStop();
             if (moonQualityStop) moonQualityStop();
             if (playbackListener && Lampa.Player.listener && Lampa.Player.listener.remove) Lampa.Player.listener.remove('start', playbackListener);
@@ -3134,7 +3167,7 @@
     }
     // Nothing is asked in the background while a video is open: the home connection and an older TV have enough to do.
     function followPlaying() {
-        try { return !!(Lampa.Player && Lampa.Player.opened && Lampa.Player.opened()); } catch (e) { return false; }
+        try { return doramaFrameOpen || !!(Lampa.Player && Lampa.Player.opened && Lampa.Player.opened()); } catch (e) { return doramaFrameOpen; }
     }
     function followRun() {
         if (followBusy || !window.Lampa || followPlaying()) return;
@@ -3536,6 +3569,8 @@
         // Look copied from the UAKino series page. No flex "gap": the TV's old browser ignores it, so spacing is done with margins.
         $('head').append('<style>' +
             '.atp{height:100%}.atp__body{padding:1.2em 3em 3em 4.2em}' +
+            '.atp-dorama-frame{position:fixed;z-index:9999;top:0;right:0;bottom:0;left:0;background:#111;color:#fff;display:flex;flex-direction:column}' +
+            '.atp-dorama-frame__bar{display:flex;align-items:center;padding:.45em 1em;font-size:1em}.atp-dorama-frame__back{padding:.5em 1em;margin-right:1em;background:#333;border-radius:.5em}.atp-dorama-frame iframe{border:0;flex:1;width:100%;min-height:0;background:#000}' +
             '.anitube-player .player-panel__next-episode-name,.anitube-player .player-info__error,.anitube-player .value--stat{display:none!important}' +
             '.atp__head{margin-bottom:1em}.atp__title{font-size:2.4em;font-weight:800;line-height:1.1}.atp__meta{margin-top:.35em;opacity:.6;font-size:1.15em}' +
             '.atp__row{display:flex;flex-wrap:wrap;margin-bottom:.4em}' +
@@ -3584,6 +3619,11 @@
                 component: 'anitube',
                 param: {name: 'anitube_russian', type: 'trigger', 'default': false},
                 field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria та російські озвучення DoramaUA.'}
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_dorama_direct', type: 'trigger', 'default': false},
+                field: {name: 'DoramaUA: прямий плеєр (тест)', description: 'На Samsung/LG відкриває плеєр сайту через інтернет телевізора. Сайт сам показує всі доріжки, включно з російськими. Керування пультом і відтворення ще перевіряються.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
