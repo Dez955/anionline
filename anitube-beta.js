@@ -1,11 +1,11 @@
 /* AniTube for Lampa. Sources: AniTube, UAFilms, AnimeOn, UAflix, UA Serials, Eneyida, Klon UA, DoramaUA, AniLibria. Series page laid out like the UAKino plugin's.
-   Provider scripts are not executed except in the explicitly enabled DoramaUA beta player. */
+   Provider scripts are not executed except in the approved DoramaUA beta player on TVs. */
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.12';
+    var VERSION = '2.0.13';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -2656,8 +2656,7 @@
                 if (!data || !data.serial || data.serial.slug !== item.ref.slug) return self.empty('DoramaUA повернув інший тайтл. Спробуй повторити пошук.');
                 var id = data && data.serial && data.serial.page_player;
                 if (!/^[1-9]\d{0,7}$/.test(String(id))) return self.empty('DoramaUA: у цього тайтлу немає плеєра.');
-                var directPlayer = Lampa.Storage.field('anitube_dorama_direct');
-                if (tvPlatform() && (directPlayer === true || directPlayer === 'true')) {
+                if (tvPlatform()) {
                     self.loading(false);
                     return self.openDoramaFrame(id);
                 }
@@ -2676,7 +2675,7 @@
             });
         };
 
-        // Explicit beta opt-in: the site's own player runs in an iframe on the TV's connection.
+        // The user's beta consent applies to the site's own player on the TV's connection.
         // It is selected before any Worker request, not used to retry an access refusal.
         this.openDoramaFrame = function (id) {
             if (!/^[1-9]\d{0,7}$/.test(String(id))) return;
@@ -3619,11 +3618,6 @@
                 component: 'anitube',
                 param: {name: 'anitube_russian', type: 'trigger', 'default': false},
                 field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria та російські озвучення DoramaUA.'}
-            });
-            Lampa.SettingsApi.addParam({
-                component: 'anitube',
-                param: {name: 'anitube_dorama_direct', type: 'trigger', 'default': false},
-                field: {name: 'DoramaUA: прямий плеєр (тест)', description: 'На Samsung/LG відкриває плеєр сайту через інтернет телевізора. Сайт сам показує всі доріжки, включно з російськими. Керування пультом і відтворення ще перевіряються.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
