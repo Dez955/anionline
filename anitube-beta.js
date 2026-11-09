@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.14';
+    var VERSION = '2.0.15';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1050,7 +1050,7 @@
     // ---- KinoPub (kinopub.me): an HDRezka-style catalogue whose title pages list their own voices, some of them Ukrainian ---------------
     // The page names the voices; the site's own public endpoint /ajax/get_cdn_series/ answers episodes and HLS addresses, and wants back the
     // per-visit token ("favs") the page carries. No cookie, Referer or made-up header; nothing of the site's player runs. Android Lampa asks
-    // the site itself, a TV asks the owner's Worker (/kp/*), which does the same two steps. The video goes straight from the site's CDN.
+    // the site itself (a TV cannot: the Worker is shown the site's bot check). The video goes straight from the site's CDN.
     // Only Ukrainian voices and the original with subtitles are listed; Russian ones only with the Russian switch, other languages never.
     // The rows "1080p Ultra / 2K / 4K" are paid ones and are skipped. The nominal quality of the free rows is not promised to be real.
     var KINOPUB = 'https://kinopub.me', KINOPUB_STALE = 6 * 3600 * 1000, KINOPUB_AHEAD = 2, KINOPUB_BEHIND = 0;
@@ -1177,53 +1177,53 @@
         return {success: data.success === true, message: typeof data.message === 'string' ? data.message : '', premium_content: Number(data.premium_content) === 1 ? 1 : 0,
             url: typeof data.url === 'string' ? data.url : '', subtitle: typeof data.subtitle === 'string' ? data.subtitle : '', episodes: typeof data.episodes === 'string' ? data.episodes : ''};
     }
+    // KinoPub shows a bot check (Anubis) to servers such as Cloudflare's, and answers their searches with unrelated titles. It is therefore asked
+    // only from the device's own connection (Android Lampa), with the plugin's own honest User-Agent and no Referer. That check is not solved or
+    // bypassed anywhere: a page that carries it is reported as it is.
+    var KINOPUB_BLOCKED = 'сайт показав перевірку браузера (захист Anubis), цього з’єднання вона не пускає';
+    function kinopubReachable() { return !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android')); }
+    function kinopubChallenge(html) {
+        return /\.within\.website\/x\/|Проверяем, что вы не бот|Making sure you(?:'|&#39;|\u2019)re not a bot/i.test(String(html || '').slice(0, 200000));
+    }
     function kinopubReason(xhr, why) {
         if (why) return String(why);
-        var said = '';
-        try { said = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
-        if (xhr && xhr.status === 404) return 'онови Worker у Cloudflare (немає маршруту /kp)';
-        if (xhr && xhr.status === 403) return 'проксі відмовив у доступі, перевір ключ';
-        if (said) return said;
-        return xhr && !xhr.status ? 'немає відповіді від сервера (перевір інтернет або Worker)' : reason(xhr);
+        return xhr && !xhr.status ? 'немає відповіді від сервера (перевір інтернет)' : reason(xhr);
     }
-    function kinopubWorker(path, params, dataType, success, failure) {
-        var query = Object.keys(params).map(function (name) { return name + '=' + encodeURIComponent(params[name]); }).join('&');
-        ajaxRetry({url: homeProxy() + '/kp/' + path + '?' + query + (homeKey() ? '&key=' + encodeURIComponent(homeKey()) : ''), dataType: dataType, timeout: 30000, cache: false, success: success, error: function (xhr) { failure(xhr); }}); // jQuery's second argument ("error", "timeout") says nothing to the user
+    function kinopubGet(url, options, success, failure) {
+        var headers = Object.assign({'Referer': '', 'User-Agent': 'AniTubeLampa/' + VERSION}, options.headers || {});
+        direct(url, Object.assign({}, options, {headers: headers}), function (answer) {
+            if (typeof answer === 'string' && kinopubChallenge(answer)) return failure(null, KINOPUB_BLOCKED);
+            success(answer);
+        }, failure);
     }
     function kinopubSearchGet(query, success, failure) {
         if (!query || query.length > 200) return failure(null, 'некоректний запит');
-        direct(KINOPUB + '/engine/ajax/search.php', {post: 'q=' + encodeURIComponent(query), dataType: 'text',
-            headers: {'Referer': '', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}}, function (html) { success(String(html)); },
-            function () { kinopubWorker('search', {q: query}, 'text', success, failure); });
+        kinopubGet(KINOPUB + '/engine/ajax/search.php', {post: 'q=' + encodeURIComponent(query), dataType: 'text',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}}, function (html) { success(String(html)); }, failure);
     }
     function kinopubPageGet(url, success, failure) {
         if (!kinopubOwn(url)) return failure(null, 'некоректна адреса сторінки');
-        direct(url, {dataType: 'text', headers: {'Referer': ''}}, function (html) { success(String(html)); }, function () { kinopubWorker('page', {url: url}, 'text', success, failure); });
+        kinopubGet(url, {dataType: 'text'}, function (html) { success(String(html)); }, failure);
     }
     // calls: [{action: get_episodes | get_stream | get_movie, translator_id, season?, episode?, is_camrip?, is_ads?, is_director?}] -> answers in the same order.
     function kinopubApi(pageUrl, calls, success, failure) {
         if (!kinopubOwn(pageUrl)) return failure(null, 'некоректна адреса сторінки');
-        function viaWorker() {
-            kinopubWorker('api', {url: pageUrl, calls: JSON.stringify(calls)}, 'json', function (data) {
-                if (Array.isArray(data) && data.length === calls.length) success(data.map(kinopubClean)); else failure(null, 'некоректна відповідь Worker');
-            }, failure);
-        }
-        direct(pageUrl, {dataType: 'text', headers: {'Referer': ''}}, function (html) {
+        kinopubGet(pageUrl, {dataType: 'text'}, function (html) {
             var favs = kinopubFavs(html), start = String(html).match(/\binitCDN(Series|Movies)Events\(\s*(\d{1,10})\s*,/);
-            if (!favs || !start) return viaWorker();
+            if (!favs || !start) return failure(null, 'на сторінці немає плеєра');
             var results = [], index = 0;
             (function next() {
                 if (index >= calls.length) return success(results);
                 var call = calls[index++], fields = Object.assign({id: start[2]}, call, {favs: favs});
-                direct(KINOPUB + '/ajax/get_cdn_series/?t=' + Date.now(), {dataType: 'text', headers: {'Referer': '', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+                kinopubGet(KINOPUB + '/ajax/get_cdn_series/?t=' + Date.now(), {dataType: 'text', headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
                     post: Object.keys(fields).map(function (name) { return name + '=' + encodeURIComponent(fields[name]); }).join('&')}, function (answer) {
                     var data = answer;
-                    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return viaWorker(); } }
+                    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return failure(null, 'сайт не повернув JSON'); } }
                     results.push(kinopubClean(data));
                     next();
-                }, viaWorker);
+                }, failure);
             })();
-        }, viaWorker);
+        }, failure);
     }
     // One episode (or film) in one voice: the best free HLS row, all free rows as Lampa's quality list, and the subtitles that come with it.
     function kinopubStream(entry, success, failure) {
@@ -1764,7 +1764,7 @@
         return !Array.isArray(hidden) || hidden.indexOf(name) < 0;
     }
     function sourceAllowed(name) {
-        return sourceVisible(name) && (!RUSSIAN_SOURCES[name] || russianEnabled());
+        return sourceVisible(name) && (!RUSSIAN_SOURCES[name] || russianEnabled()) && (name !== 'kinopub' || kinopubReachable());
     }
     function sourceSettings() {
         var back = Lampa.Controller.enabled().name;
