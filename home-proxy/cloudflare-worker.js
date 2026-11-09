@@ -33,6 +33,12 @@
 //   GET /dle/<eneyida|klon>/page?url=<page>&key=<key>  one title page of that site (HTML)
 //   GET /dle/eneyida/player?url=<page>&key=<key>       https://hdvbua.pro/embd/<id> (a show) or /vid/<id> (a film) (HTML)
 //
+// KinoPub: a catalogue whose titles list Ukrainian dubs and subtitles. /kp/api opens the title page for its per-visit token, then asks the
+// site's own endpoint (whitelisted calls only: get_episodes, get_stream, get_movie). No cookie, Referer or made-up header; media stays direct.
+//   GET /kp/search?q=<text>&key=<key>             the site's live search answer (HTML list of titles)
+//   GET /kp/page?url=<page>&key=<key>             one title page of kinopub.me (HTML)
+//   GET /kp/api?url=<page>&calls=<JSON>&key=<key> [{action, translator_id, season?, episode?, is_camrip?, is_ads?, is_director?}] -> JSON list
+//
 // Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
 // from somewhere Ashdi accepts, add a plain-text variable EMBED_URL = the address of the bot's proxy, e.g.
 // https://<service>.koyeb.app/anitube : /embed is then relayed there with the same ACCESS_KEY. Search and playlist stay here.
@@ -290,6 +296,98 @@ async function dleRoute(site, action, params) {
   return null;
 }
 
+// KinoPub (kinopub.me): an HDRezka-style catalogue whose title pages list their own voices (some Ukrainian) and whose public endpoint
+// /ajax/get_cdn_series/ answers episodes and HLS addresses. The title page hands every visitor a per-visit token ("favs", a hidden field);
+// the endpoint wants it back. No cookie, Referer, Origin or made-up header is sent, nothing is stored, and the video itself stays a direct
+// stream from the site's CDN. Callers cannot choose a host or path: a title page of this site, and a short list of whitelisted calls.
+const KINOPUB = 'https://kinopub.me';
+const KINOPUB_PAGE = /^\/[a-z-]{3,20}\/[a-z0-9-]{3,40}\/[0-9]{1,8}-[a-z0-9-]{1,120}\.html$/i;
+const KINOPUB_HEADERS = { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8' };
+
+async function kinopubSearch(query) {
+  if (!query || query.length > 200) return json({ error: 'invalid_query' }, 400);
+  const response = await fetch(KINOPUB + '/engine/ajax/search.php', {
+    method: 'POST', redirect: 'manual',
+    headers: { ...KINOPUB_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+    body: new URLSearchParams({ q: query }).toString()
+  });
+  return html(await read(response));
+}
+
+async function kinopubPage(raw) {
+  const address = validPage(raw, 'kinopub.me', KINOPUB_PAGE);
+  if (!address) return null;
+  return read(await fetch(address, { redirect: 'manual', headers: KINOPUB_HEADERS }));
+}
+
+// [{action, translator_id, season?, episode?, is_camrip?, is_ads?, is_director?}] with digits only, at most eight.
+function kinopubCalls(raw) {
+  let calls;
+  try { calls = JSON.parse(raw || ''); } catch { return null; }
+  if (!Array.isArray(calls) || !calls.length || calls.length > 8) return null;
+  const flag = (value) => (value === undefined || value === null || value === '' ? '0' : String(value));
+  const out = [];
+  for (const call of calls) {
+    if (!call || typeof call !== 'object') return null;
+    const translator = String(call.translator_id);
+    if (!/^[1-9][0-9]{0,5}$/.test(translator)) return null;
+    if (call.action === 'get_episodes') out.push({ action: 'get_episodes', translator_id: translator });
+    else if (call.action === 'get_stream') {
+      const season = String(call.season), episode = String(call.episode);
+      if (!/^[0-9]{1,3}$/.test(season) || !/^[0-9]{1,4}$/.test(episode)) return null;
+      out.push({ action: 'get_stream', translator_id: translator, season, episode });
+    } else if (call.action === 'get_movie') {
+      const flags = [flag(call.is_camrip), flag(call.is_ads), flag(call.is_director)];
+      if (flags.some((value) => value !== '0' && value !== '1')) return null;
+      out.push({ action: 'get_movie', translator_id: translator, is_camrip: flags[0], is_ads: flags[1], is_director: flags[2] });
+    } else return null;
+  }
+  return out;
+}
+
+function kinopubClean(data) {
+  if (!data || typeof data !== 'object') return { success: false, message: 'некоректна відповідь' };
+  const text = (value, limit) => (typeof value === 'string' ? value.slice(0, limit) : value === false ? false : undefined);
+  return {
+    success: data.success === true,
+    message: text(data.message, 300) || '',
+    premium_content: Number(data.premium_content) === 1 ? 1 : 0,
+    url: text(data.url, 40000),
+    quality: text(data.quality, 20),
+    subtitle: text(data.subtitle, 4000),
+    subtitle_def: text(data.subtitle_def, 20),
+    episodes: text(data.episodes, 300000)
+  };
+}
+
+async function kinopubApi(params) {
+  const address = validPage(params.get('url') || '', 'kinopub.me', KINOPUB_PAGE);
+  const calls = kinopubCalls(params.get('calls') || '');
+  if (!address || !calls) return json({ error: 'invalid_kinopub_request' }, 400);
+  const text = await read(await fetch(address, { redirect: 'manual', headers: KINOPUB_HEADERS }));
+  const start = text.match(/\binitCDN(Series|Movies)Events\(\s*([0-9]{1,10})\s*,/);
+  const favs = text.match(/\bid=["']ctrl_favs["'][^>]*\bvalue=["']([^"']{8,80})["']|\bvalue=["']([^"']{8,80})["'][^>]*\bid=["']ctrl_favs["']/);
+  if (!start || !favs) throw new UpstreamError('KinoPub: на сторінці немає плеєра');
+  const series = start[1] === 'Series';
+  if (calls.some((call) => (call.action === 'get_movie') === series)) return json({ error: 'kinopub_wrong_kind' }, 400);
+  const results = [];
+  for (const call of calls) {
+    const body = new URLSearchParams({ id: start[2], ...call, favs: favs[1] || favs[2] });
+    const response = await fetch(KINOPUB + '/ajax/get_cdn_series/?t=' + Date.now(), {
+      method: 'POST', redirect: 'manual',
+      headers: { ...KINOPUB_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: body.toString()
+    });
+    let data;
+    try { data = JSON.parse(await read(response)); } catch (error) {
+      if (error instanceof UpstreamError) throw error;
+      throw new UpstreamError('KinoPub не повернув JSON');
+    }
+    results.push(kinopubClean(data));
+  }
+  return json(results);
+}
+
 // Public Moon iframe pages only; no arbitrary proxy destinations or redirects.
 async function moonPage(raw) {
   let page;
@@ -472,6 +570,12 @@ export default {
         return player ? json({ player }) : json({ error: 'player_missing' }, UPSTREAM_STATUS);
       }
       if (url.pathname === '/uf/embed') return await ufEmbed(url.searchParams.get('url') || '');
+      if (url.pathname === '/kp/search') return await kinopubSearch((url.searchParams.get('q') || '').trim());
+      if (url.pathname === '/kp/page') {
+        const text = await kinopubPage(url.searchParams.get('url') || '');
+        return text === null ? json({ error: 'invalid_kinopub_page' }, 400) : html(text);
+      }
+      if (url.pathname === '/kp/api') return await kinopubApi(url.searchParams);
       if (url.pathname === '/uaserials/search') return await uaserialsSearch((url.searchParams.get('q') || '').trim());
       if (url.pathname === '/uaserials/page') {
         const text = await uaserialsPage(url.searchParams.get('url') || '');
