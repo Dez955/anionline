@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.18';
+    var VERSION = '2.0.19';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -529,11 +529,25 @@
             .map(function (name) { return name + '=' + encodeURIComponent(params[name]); }).concat('key=' + encodeURIComponent(DEFAULT_KEY)).join('&');
         $.ajax({url: base + '/' + path + '?' + query, dataType: dataType, timeout: 25000, cache: false, success: success, error: failure});
     }
+    // Text that a server sent as UTF-8 but that was read as Windows-1252/Latin-1 ("Ð½Ðµ" instead of "не"). This happens when a helper's own source
+    // was pasted or saved with the wrong encoding. The bytes are put back and read as UTF-8; anything that is not such text is returned as it is.
+    var CP1252_BYTES = {8364: 128, 8218: 130, 402: 131, 8222: 132, 8230: 133, 8224: 134, 8225: 135, 710: 136, 8240: 137, 352: 138, 8249: 139, 338: 140, 381: 142,
+        8216: 145, 8217: 146, 8220: 147, 8221: 148, 8226: 149, 8211: 150, 8212: 151, 732: 152, 8482: 153, 353: 154, 8250: 155, 339: 156, 382: 158, 376: 159};
+    function repairText(value) {
+        if (typeof value !== 'string' || !/[\u00c2-\u00f4][\u0080-\u00bf\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192\u02c6\u02dc\u2013-\u203a\u20ac\u2122]/.test(value)) return value;
+        var hex = '';
+        for (var i = 0; i < value.length; i++) {
+            var code = value.charCodeAt(i), byte = code < 256 ? code : CP1252_BYTES[code];
+            if (byte === undefined) return value;
+            hex += '%' + (byte < 16 ? '0' : '') + byte.toString(16);
+        }
+        try { return decodeURIComponent(hex); } catch (e) { return value; }
+    }
     // Why the box did not help, in words: its own explanation when it answered, otherwise a hint about the likely cause.
     function boxReason(xhr) {
         var base = boxAddress(), host = base.replace(/^https?:\/\//i, '');
         try {
-            var said = xhr && xhr.responseText && JSON.parse(xhr.responseText).error;
+            var said = xhr && xhr.responseText && repairText(JSON.parse(xhr.responseText).error);
             if (said) return 'приставка ' + host + ': ' + String(said).slice(0, 120);
         } catch (e) {}
         if (xhr && xhr.status) return 'приставка ' + host + ': HTTP ' + xhr.status;
@@ -571,7 +585,7 @@
             },
             error: function (xhr) {
                 var said = '';
-                try { said = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
+                try { said = repairText(JSON.parse(xhr.responseText).error) || ''; } catch (e) {}
                 uafixClearCookie();
                 // Only a refusal by uafix itself pauses the automatic attempts; a network failure does not.
                 if (xhr && (xhr.status === 401 || xhr.status === 429)) { try { Lampa.Storage.set('anitube_uafix_fail', Date.now()); } catch (e) {} }
@@ -1450,7 +1464,7 @@
         }
         function whyFailed(xhr) {
             var said = '';
-            try { said = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
+            try { said = repairText(JSON.parse(xhr.responseText).error) || ''; } catch (e) {}
             return xhr && xhr.status === 404 ? 'онови Worker у Cloudflare для DoramaUA' : said || reason(xhr);
         }
         function failed(xhr) { failure(whyFailed(xhr)); }
@@ -1787,7 +1801,7 @@
         var status = xhr && xhr.status ? 'проксі: HTTP ' + xhr.status : 'проксі: помилка мережі';
         // The helper explains upstream failures in its JSON body (e.g. {"error": "HTTP 403"} when AniTube refuses its address).
         try {
-            var said = xhr && xhr.responseText && JSON.parse(xhr.responseText).error;
+            var said = xhr && xhr.responseText && repairText(JSON.parse(xhr.responseText).error);
             if (said) status += ' – ' + String(said).slice(0, 80);
         } catch (e) {}
         var hint = '';
@@ -3575,7 +3589,7 @@
     }
     function syncFailure(xhr) {
         var said = '';
-        try { said = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
+        try { said = repairText(JSON.parse(xhr.responseText).error) || ''; } catch (e) {}
         if (said === 'sync_not_configured') return 'у Worker не підключене сховище SYNC';
         if (xhr && xhr.status === 404) return 'Worker ще без синхронізації: потрібен новий код і Deploy';
         if (xhr && xhr.status === 403) return 'ключ Worker не підходить';

@@ -81,10 +81,10 @@ function validPage(raw, host, pathPattern) {
 }
 
 async function read(response) {
-  if (response.status >= 300 && response.status < 400) throw new UpstreamError('перенаправлення (HTTP ' + response.status + ')');
+  if (response.status >= 300 && response.status < 400) throw new UpstreamError('\u043f\u0435\u0440\u0435\u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043d\u044f (HTTP ' + response.status + ')');
   if (!response.ok) throw new UpstreamError('HTTP ' + response.status);
   const text = await response.text();
-  if (text.length > MAX_BODY) throw new UpstreamError('завелика відповідь');
+  if (text.length > MAX_BODY) throw new UpstreamError('\u0437\u0430\u0432\u0435\u043b\u0438\u043a\u0430 \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0434\u044c');
   return text;
 }
 
@@ -136,13 +136,13 @@ async function playlist(raw) {
   let data;
   try { data = JSON.parse(await read(response)); } catch (e) {
     if (e instanceof UpstreamError) throw e;
-    throw new UpstreamError('некоректний JSON плейлиста');
+    throw new UpstreamError('\u043d\u0435\u043a\u043e\u0440\u0435\u043a\u0442\u043d\u0438\u0439 JSON \u043f\u043b\u0435\u0439\u043b\u0438\u0441\u0442\u0430');
   }
   if (!data || data.success !== true || typeof data.response !== 'string') return json({ success: false, error: 'playlist_unavailable' }, UPSTREAM_STATUS);
   return json({ success: true, response: data.response });
 }
 
-const GEO_BLOCK = 'Змініть країну перегляду';
+const GEO_BLOCK = '\u0417\u043c\u0456\u043d\u0456\u0442\u044c \u043a\u0440\u0430\u0457\u043d\u0443 \u043f\u0435\u0440\u0435\u0433\u043b\u044f\u0434\u0443';
 
 async function embed(raw, env) {
   const page = validPage(raw, 'ashdi.vip', /^\/(?:vod|serial)\/\d+$/);
@@ -155,14 +155,14 @@ async function embed(raw, env) {
     if (!response.ok) {
       let reason = 'HTTP ' + response.status;
       try { reason = JSON.parse(await response.text()).error || reason; } catch { /* keep the status */ }
-      throw new UpstreamError('ретрансляція плеєра: ' + reason);
+      throw new UpstreamError('\u0440\u0435\u0442\u0440\u0430\u043d\u0441\u043b\u044f\u0446\u0456\u044f \u043f\u043b\u0435\u0454\u0440\u0430: ' + reason);
     }
     text = await response.text();
   } else {
     text = await read(await get(page));
   }
-  if (text.length > MAX_BODY) throw new UpstreamError('завелика відповідь');
-  if (text.includes(GEO_BLOCK)) throw new UpstreamError('Ashdi не пускає країну цього сервера (див. EMBED_URL)');
+  if (text.length > MAX_BODY) throw new UpstreamError('\u0437\u0430\u0432\u0435\u043b\u0438\u043a\u0430 \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0434\u044c');
+  if (text.includes(GEO_BLOCK)) throw new UpstreamError('Ashdi \u043d\u0435 \u043f\u0443\u0441\u043a\u0430\u0454 \u043a\u0440\u0430\u0457\u043d\u0443 \u0446\u044c\u043e\u0433\u043e \u0441\u0435\u0440\u0432\u0435\u0440\u0430 (\u0434\u0438\u0432. EMBED_URL)');
   return html(text);
 }
 
@@ -179,27 +179,27 @@ async function ufRelay(path, url, env) {
   if (!response.ok) {
     let reason = 'HTTP ' + response.status;
     try { reason = JSON.parse(body).error || reason; } catch { /* keep the status */ }
-    throw new UpstreamError('ретрансляція uafix: ' + reason);
+    throw new UpstreamError('\u0440\u0435\u0442\u0440\u0430\u043d\u0441\u043b\u044f\u0446\u0456\u044f uafix: ' + reason);
   }
-  if (body.length > MAX_BODY) throw new UpstreamError('завелика відповідь');
+  if (body.length > MAX_BODY) throw new UpstreamError('\u0437\u0430\u0432\u0435\u043b\u0438\u043a\u0430 \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0434\u044c');
   return reply(body, 200, response.headers.get('Content-Type') || 'text/plain; charset=utf-8');
 }
 
 // Signs in to uafix.net with the caller's own login and password. uafix refuses Cloudflare's servers, so the bot (EMBED_URL) does it.
 async function ufLogin(request, env) {
   const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
-  if (!/^https:\/\/\S+$/.test(relay)) return json({ ok: false, error: 'EMBED_URL (адреса бота) не задана у Worker' }, UPSTREAM_STATUS);
+  if (!/^https:\/\/\S+$/.test(relay)) return json({ ok: false, error: 'EMBED_URL (\u0430\u0434\u0440\u0435\u0441\u0430 \u0431\u043e\u0442\u0430) \u043d\u0435 \u0437\u0430\u0434\u0430\u043d\u0430 \u0443 Worker' }, UPSTREAM_STATUS);
   let body;
   try { body = JSON.parse(await request.text()); } catch (e) { return json({ ok: false, error: 'invalid_json' }, 400); }
   const login = String((body && body.login) || '').trim();
   const password = String((body && body.password) || '');
-  if (!login || !password || login.length > 100 || password.length > 200) return json({ ok: false, error: 'вкажіть логін і пароль' }, 400);
+  if (!login || !password || login.length > 100 || password.length > 200) return json({ ok: false, error: '\u0432\u043a\u0430\u0436\u0456\u0442\u044c \u043b\u043e\u0433\u0456\u043d \u0456 \u043f\u0430\u0440\u043e\u043b\u044c' }, 400);
   const target = relay + '/uf/login?key=' + encodeURIComponent(String(env.ACCESS_KEY).trim());
   const response = await fetch(target, { method: 'POST', redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Content-Type': 'application/json' }, body: JSON.stringify({ login, password }) });
   const text = await response.text();
   let answer;
-  try { answer = JSON.parse(text); } catch (e) { return json({ ok: false, error: 'бот відповів HTTP ' + response.status }, UPSTREAM_STATUS); }
-  return json({ ok: !!answer.ok, cookie: answer.ok ? String(answer.cookie || '') : undefined, error: answer.ok ? undefined : String(answer.error || 'помилка входу').slice(0, 180) }, response.ok ? 200 : response.status === 404 ? 404 : response.status);
+  try { answer = JSON.parse(text); } catch (e) { return json({ ok: false, error: '\u0431\u043e\u0442 \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0432 HTTP ' + response.status }, UPSTREAM_STATUS); }
+  return json({ ok: !!answer.ok, cookie: answer.ok ? String(answer.cookie || '') : undefined, error: answer.ok ? undefined : String(answer.error || '\u043f\u043e\u043c\u0438\u043b\u043a\u0430 \u0432\u0445\u043e\u0434\u0443').slice(0, 180) }, response.ok ? 200 : response.status === 404 ? 404 : response.status);
 }
 
 async function ufSearch(query) {
@@ -226,7 +226,7 @@ async function ufEmbed(raw) {
   const page = validPage(raw, 'zetvideo.net', /^\/vod\/\d+$/);
   if (!page) return json({ error: 'invalid_player_page' }, 400);
   const text = await read(await get(page, UAFIX + '/'));
-  if (/[Зз]мініть країну|not available in your country/i.test(text)) throw new UpstreamError('плеєр не пускає країну цього сервера');
+  if (/[\u0417\u0437]\u043c\u0456\u043d\u0456\u0442\u044c \u043a\u0440\u0430\u0457\u043d\u0443|not available in your country/i.test(text)) throw new UpstreamError('\u043f\u043b\u0435\u0454\u0440 \u043d\u0435 \u043f\u0443\u0441\u043a\u0430\u0454 \u043a\u0440\u0430\u0457\u043d\u0443 \u0446\u044c\u043e\u0433\u043e \u0441\u0435\u0440\u0432\u0435\u0440\u0430');
   return html(text);
 }
 
@@ -300,7 +300,7 @@ async function moonPage(raw) {
     'User-Agent': USER_AGENT, 'Accept': '*/*', 'Accept-Language': 'uk', 'Referer': SITE + '/'
   } });
   const text = await read(response);
-  if (/<title>\s*Just a moment|Enable JavaScript and cookies to continue/i.test(text)) throw new UpstreamError('Moon вимагає перевірку браузера');
+  if (/<title>\s*Just a moment|Enable JavaScript and cookies to continue/i.test(text)) throw new UpstreamError('Moon \u0432\u0438\u043c\u0430\u0433\u0430\u0454 \u043f\u0435\u0440\u0435\u0432\u0456\u0440\u043a\u0443 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430');
   return html(text);
 }
 
@@ -324,7 +324,7 @@ async function animeonCatalogApi(action, params) {
   const response = await fetch('https://animeon.club/api' + path, {redirect: 'manual', signal: AbortSignal.timeout(8000), headers: {'User-Agent': USER_AGENT, Accept: 'application/json'}});
   const text = await read(response);
   let data;
-  try { data = JSON.parse(text); } catch { throw new UpstreamError('AnimeOn не повернув JSON'); }
+  try { data = JSON.parse(text); } catch { throw new UpstreamError('AnimeOn \u043d\u0435 \u043f\u043e\u0432\u0435\u0440\u043d\u0443\u0432 JSON'); }
   return json(data);
 }
 
@@ -336,8 +336,8 @@ async function animeonEpisode(id) {
   } });
   const text = await read(response);
   let page;
-  try { page = new URL(JSON.parse(text).videoUrl); } catch { throw new UpstreamError('AnimeOn не дав адресу плеєра'); }
-  if (page.protocol !== 'https:' || page.hostname !== 'ashdi.vip' || !/^\/vod\/\d+$/.test(page.pathname)) throw new UpstreamError('AnimeOn не дав адресу плеєра');
+  try { page = new URL(JSON.parse(text).videoUrl); } catch { throw new UpstreamError('AnimeOn \u043d\u0435 \u0434\u0430\u0432 \u0430\u0434\u0440\u0435\u0441\u0443 \u043f\u043b\u0435\u0454\u0440\u0430'); }
+  if (page.protocol !== 'https:' || page.hostname !== 'ashdi.vip' || !/^\/vod\/\d+$/.test(page.pathname)) throw new UpstreamError('AnimeOn \u043d\u0435 \u0434\u0430\u0432 \u0430\u0434\u0440\u0435\u0441\u0443 \u043f\u043b\u0435\u0454\u0440\u0430');
   return json({ videoUrl: page.origin + page.pathname });
 }
 
@@ -431,10 +431,10 @@ async function doramaPlayer(params) {
   const text = await read(await fetch(url.href, {redirect: 'manual', headers: {
     'User-Agent': USER_AGENT, 'Accept': 'text/html', 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8'
   }}));
-  if (!/data-config\s*=/.test(text) && /не[\s\S]{0,15}доступно в вашем регионе|Змініть країну перегляду/i.test(text)) {
-    throw new UpstreamError('DoramaUA не пускає країну цього сервера');
+  if (!/data-config\s*=/.test(text) && /\u043d\u0435[\s\S]{0,15}\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e \u0432 \u0432\u0430\u0448\u0435\u043c \u0440\u0435\u0433\u0438\u043e\u043d\u0435|\u0417\u043c\u0456\u043d\u0456\u0442\u044c \u043a\u0440\u0430\u0457\u043d\u0443 \u043f\u0435\u0440\u0435\u0433\u043b\u044f\u0434\u0443/i.test(text)) {
+    throw new UpstreamError('DoramaUA \u043d\u0435 \u043f\u0443\u0441\u043a\u0430\u0454 \u043a\u0440\u0430\u0457\u043d\u0443 \u0446\u044c\u043e\u0433\u043e \u0441\u0435\u0440\u0432\u0435\u0440\u0430');
   }
-  if (!/\bid=["']inputData["']/.test(text) || !/data-config\s*=/.test(text)) throw new UpstreamError('DoramaUA не повернув сторінку плеєра');
+  if (!/\bid=["']inputData["']/.test(text) || !/data-config\s*=/.test(text)) throw new UpstreamError('DoramaUA \u043d\u0435 \u043f\u043e\u0432\u0435\u0440\u043d\u0443\u0432 \u0441\u0442\u043e\u0440\u0456\u043d\u043a\u0443 \u043f\u043b\u0435\u0454\u0440\u0430');
   return html(text);
 }
 
