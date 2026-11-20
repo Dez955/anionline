@@ -1,11 +1,11 @@
-/* ДубльUA (formerly AniTube) for Lampa. Sources: AniTube, UAFilms, AnimeOn, UAflix, UA Serials, Eneyida, Klon UA, DoramaUA, KinoPub, AniLibria. Series page laid out like the UAKino plugin's.
+/* ДубльUA (formerly AniTube) for Lampa. Sources: AniTube, UAFilms, AnimeOn, UAflix, UA Serials, Eneyida, Klon UA, DoramaUA, AniLibria. Series page laid out like the UAKino plugin's.
    No provider scripts are executed. */
 (function () {
     'use strict';
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.17';
+    var VERSION = '2.0.18';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1148,250 +1148,6 @@
         return Array.isArray(data) ? playlistSeasons(data) : {};
     }
 
-    // ---- KinoPub (kinopub.me): an HDRezka-style catalogue whose title pages list their own voices, some of them Ukrainian ---------------
-    // The page names the voices; the site's own public endpoint /ajax/get_cdn_series/ answers episodes and HLS addresses, and wants back the
-    // per-visit token ("favs") the page carries. No cookie, Referer or made-up header; nothing of the site's player runs. Android Lampa asks
-    // the site itself (a TV cannot: the Worker is shown the site's bot check). The video goes straight from the site's CDN.
-    // Only Ukrainian voices and the original with subtitles are listed; Russian ones only with the Russian switch, other languages never.
-    // The rows "1080p Ultra / 2K / 4K" are paid ones and are skipped. The nominal quality of the free rows is not promised to be real.
-    var KINOPUB = 'https://kinopub.me', KINOPUB_STALE = 6 * 3600 * 1000, KINOPUB_AHEAD = 2, KINOPUB_BEHIND = 0;
-    var KINOPUB_CDN = /^(?:[a-z0-9-]+\.)*voidboost\.[a-z]{2,6}$/i;
-    var KINOPUB_OTHER = /белорус|беларус|грузин|казах|азербайдж|армян|узбек|турецк|польск|англий|немецк|француз|испанск|итальянск|корейск|японск|китайск|литовск|латыш|эстон|иврит|болгар|чешск|румын|тайск|таджик|кыргыз|молдав/i;
-    function kinopubOwn(value) {
-        try {
-            var url = new URL(value);
-            return url.protocol === 'https:' && url.hostname === 'kinopub.me' && !url.port && !url.search && !url.hash &&
-                /^\/[a-z-]{3,20}\/[a-z0-9-]{3,40}\/\d{1,8}-[a-z0-9-]{1,120}\.html$/i.test(url.pathname);
-        } catch (e) { return false; }
-    }
-    // The live search answer: <li><a href=page><span class="enty">Русская назва</span> (Original / names, сериал, 2026 - ...)<span rating>…
-    function kinopubCatalog(html) {
-        var seen = {};
-        return list(page(html), '.b-search__section_list li a').map(function (link) {
-            var url = absolute(link.getAttribute('href'), KINOPUB + '/'), title = text(link.querySelector('.enty')).replace(/\s+/g, ' ').trim();
-            if (!kinopubOwn(url) || !title || seen[url]) return null;
-            seen[url] = true;
-            var tail = Array.prototype.filter.call(link.childNodes, function (node) { return node.nodeType === 3; }).map(function (node) { return node.textContent; }).join('');
-            var inner = (tail.match(/\(([\s\S]*)\)/) || [])[1] || '', year = '', series = false;
-            inner = inner.replace(/,\s*((?:19|20)\d\d)(?:\s*-\s*(?:(?:19|20)\d\d|\.\.\.))?\s*$/, function (all, y) { year = y; return ''; });
-            inner = inner.replace(/,\s*(сериал|мультсериал|мультфильм|аниме|тв-шоу|шоу|документальн[^,]*)\s*$/i, function (all, kind) { series = /сериал/i.test(kind); return ''; });
-            var originals = inner.split(/\s+\/\s+/).map(function (part) { return part.replace(/\s+/g, ' ').trim(); }).filter(Boolean);
-            return {title: shortName(title), names: [title].concat(originals), url: url, year: year, note: [year, series ? 'серіал' : ''].filter(Boolean).join(' · '), ref: {url: url}};
-        }).filter(Boolean);
-    }
-    function kinopubFavs(html) {
-        var match = String(html).match(/\bid=["']ctrl_favs["'][^>]*\bvalue=["']([^"']{8,80})["']|\bvalue=["']([^"']{8,80})["'][^>]*\bid=["']ctrl_favs["']/);
-        return match ? match[1] || match[2] : '';
-    }
-    // Maps the site's wording of a voice to what the screen shows, or null when it is not wanted (other languages, Russian while the switch is off).
-    function kinopubVoice(name) {
-        var n = String(name || '').replace(/\s+/g, ' ').trim();
-        if (!n) return null;
-        if (/украин|українськ|\bukr\b|ukrainian|\(ua\)|\bua\b/i.test(n)) {
-            return {kind: 0, label: n.replace(/Украинск(?:ий|ая|ое)/gi, 'Український').replace(/многоголос\S*/gi, 'багатоголосий').replace(/двухголос\S*/gi, 'двоголосий')
-                .replace(/одноголос\S*/gi, 'одноголосий').replace(/закадров\S*/gi, 'закадровий').replace(/озвучк\S*/gi, 'озвучення').trim()};
-        }
-        if (/оригинал|original/i.test(n)) return {kind: 1, label: /субтитр/i.test(n) ? 'Оригінал + субтитри' : 'Оригінал'};
-        if (KINOPUB_OTHER.test(n) || !russianEnabled()) return null;
-        return {kind: 3, label: n + ' (рос.)'};
-    }
-    // The title page: its id, whether it is a series, and the voices worth listing ({tr, label, kind, camrip, ads, director}).
-    function kinopubPageInfo(html) {
-        var start = String(html).match(/\binitCDN(Series|Movies)Events\(\s*(\d{1,10})\s*,/);
-        if (!start) return null;
-        var voices = [];
-        list(page(html), '#translators-list .b-translator__item').forEach(function (li) {
-            var tr = li.getAttribute('data-translator_id') || '', info = /^[1-9]\d{0,5}$/.test(tr) ? kinopubVoice(li.getAttribute('title') || text(li)) : null;
-            // A camera copy or a version with the site's own advertising is not offered; a director's cut is.
-            if (!info || li.getAttribute('data-camrip') === '1' || li.getAttribute('data-ads') === '1') return;
-            voices.push({tr: tr, label: info.label + (li.getAttribute('data-director') === '1' ? ' (режисерська)' : ''), kind: info.kind, camrip: li.getAttribute('data-camrip') === '1' ? '1' : '0',
-                ads: li.getAttribute('data-ads') === '1' ? '1' : '0', director: li.getAttribute('data-director') === '1' ? '1' : '0', order: voices.length});
-        });
-        voices.sort(function (a, b) { return (a.kind - b.kind) || (a.order - b.order); });
-        // Ukrainian dubs and the original first, the Russian ones last; a long list is cut so that opening a title stays quick.
-        return {id: start[2], series: start[1] === 'Series', voices: voices.filter(function (v) { return v.kind < 3; }).slice(0, 5).concat(voices.filter(function (v) { return v.kind === 3; }).slice(0, 3))};
-    }
-    // The episodes one voice has: {season: [episode numbers]} from the get_episodes answer.
-    function kinopubEpisodes(html) {
-        var found = {};
-        list(page(html), '.b-simple_episode__item').forEach(function (li) {
-            var s = li.getAttribute('data-season_id'), e = li.getAttribute('data-episode_id');
-            if (!/^\d{1,3}$/.test(s || '') || !/^\d{1,4}$/.test(e || '')) return;
-            var numbers = found[+s] = found[+s] || [];
-            if (numbers.indexOf(+e) < 0) numbers.push(+e);
-        });
-        Object.keys(found).forEach(function (s) { found[s].sort(function (a, b) { return a - b; }); });
-        return found;
-    }
-    // {season: [voice, ...]} for the screen. A film is season 1 with one "episode" per voice; replies[i] is the get_episodes answer for info.voices[i].
-    function kinopubSeasons(pageUrl, info, replies) {
-        var seasons = {};
-        info.voices.forEach(function (voice, index) {
-            var base = {page: pageUrl, id: info.id, tr: voice.tr};
-            if (!info.series) {
-                (seasons[1] = seasons[1] || []).push({label: voice.label, kind: voice.kind, episodes: [{title: 'Фільм',
-                    url: 'kinopub:' + info.id + ':' + voice.tr, ref: Object.assign({film: true, camrip: voice.camrip, ads: voice.ads, director: voice.director}, base)}]});
-                return;
-            }
-            var reply = replies && replies[index];
-            if (!reply || reply.success !== true || reply.premium_content === 1) return;
-            var episodes = kinopubEpisodes(reply.episodes || '');
-            Object.keys(episodes).forEach(function (s) {
-                (seasons[s] = seasons[s] || []).push({label: voice.label, kind: voice.kind, episodes: episodes[s].map(function (e) {
-                    return {title: 'Серія ' + e, url: 'kinopub:' + info.id + ':' + voice.tr + ':' + s + ':' + e, ref: Object.assign({season: +s, episode: e}, base)};
-                })});
-            });
-        });
-        return seasons;
-    }
-    // "[360p]https://… or https://…,[480p]…": a free row is labelled with plain "NNNp"; the paid rows carry markup inside the label.
-    function kinopubQualities(value) {
-        var found = {}, best = '', top = 0;
-        String(value || '').split(/,(?=\[)/).forEach(function (part) {
-            var row = part.match(/^\[(\d{3,4}p)\]([\s\S]*)$/);
-            if (!row) return;
-            var address = row[2].split(' or ').map(function (a) { return a.trim(); }).filter(function (a) {
-                try { var u = new URL(a); return u.protocol === 'https:' && KINOPUB_CDN.test(u.hostname) && !u.username && !u.password && !u.port && /:hls:manifest\.m3u8$/.test(u.pathname); } catch (e) { return false; }
-            })[0];
-            if (!address) return;
-            found[row[1]] = address;
-            if (parseInt(row[1], 10) > top) { top = parseInt(row[1], 10); best = row[1]; }
-        });
-        return {qualities: found, best: best};
-    }
-    // "[Українська]https://…vtt,[Русский]https://…": Ukrainian first; Russian only with the switch. Only .vtt/.srt on the site's own CDN.
-    function kinopubSubtitles(value, all) {
-        var ukrainian = [], other = [];
-        String(value || '').split(',').forEach(function (part) {
-            var item = part.match(/^\s*\[([^\]]+)\]\s*(https:\/\/\S+?)\s*$/), address;
-            if (!item) return;
-            try { address = new URL(item[2]); } catch (e) { return; }
-            if (!KINOPUB_CDN.test(address.hostname) || !/\.(vtt|srt)$/i.test(address.pathname)) return;
-            var label = item[1].trim();
-            if (!all && /русск|russian/i.test(label) && !russianEnabled()) return;
-            (/україн|ukrain/i.test(label) ? ukrainian : other).push({label: label, url: address.href});
-        });
-        return ukrainian.concat(other);
-    }
-    function kinopubClean(data) {
-        if (!data || typeof data !== 'object') return {success: false, message: 'некоректна відповідь'};
-        return {success: data.success === true, message: typeof data.message === 'string' ? data.message : '', premium_content: Number(data.premium_content) === 1 ? 1 : 0,
-            url: typeof data.url === 'string' ? data.url : '', subtitle: typeof data.subtitle === 'string' ? data.subtitle : '', episodes: typeof data.episodes === 'string' ? data.episodes : ''};
-    }
-    // KinoPub shows a bot check (Anubis) to servers such as Cloudflare's, and answers their searches with unrelated titles. It is therefore asked
-    // only from the device's own connection (Android Lampa), with the plugin's own honest User-Agent and no Referer. That check is not solved or
-    // bypassed anywhere: a page that carries it is reported as it is.
-    var KINOPUB_BLOCKED = 'сайт показав перевірку браузера (захист Anubis), цього з’єднання вона не пускає';
-    function kinopubReachable() { return !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android')); }
-    function kinopubChallenge(html) {
-        return /\.within\.website\/x\/|Проверяем, что вы не бот|Making sure you(?:'|&#39;|\u2019)re not a bot/i.test(String(html || '').slice(0, 200000));
-    }
-    function kinopubReason(xhr, why) {
-        if (why) return String(why);
-        return xhr && !xhr.status ? 'немає відповіді від сервера (перевір інтернет)' : reason(xhr);
-    }
-    function kinopubGet(url, options, success, failure) {
-        var headers = Object.assign({'Referer': '', 'User-Agent': 'AniTubeLampa/' + VERSION}, options.headers || {});
-        direct(url, Object.assign({}, options, {headers: headers}), function (answer) {
-            if (typeof answer === 'string' && kinopubChallenge(answer)) return failure(null, KINOPUB_BLOCKED);
-            success(answer);
-        }, failure);
-    }
-    function kinopubSearchGet(query, success, failure) {
-        if (!query || query.length > 200) return failure(null, 'некоректний запит');
-        kinopubGet(KINOPUB + '/engine/ajax/search.php', {post: 'q=' + encodeURIComponent(query), dataType: 'text',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}}, function (html) { success(String(html)); }, failure);
-    }
-    function kinopubPageGet(url, success, failure) {
-        if (!kinopubOwn(url)) return failure(null, 'некоректна адреса сторінки');
-        kinopubGet(url, {dataType: 'text'}, function (html) { success(String(html)); }, failure);
-    }
-    // calls: [{action: get_episodes | get_stream | get_movie, translator_id, season?, episode?, is_camrip?, is_ads?, is_director?}] -> answers in the same order.
-    function kinopubApi(pageUrl, calls, success, failure) {
-        if (!kinopubOwn(pageUrl)) return failure(null, 'некоректна адреса сторінки');
-        kinopubGet(pageUrl, {dataType: 'text'}, function (html) {
-            var favs = kinopubFavs(html), start = String(html).match(/\binitCDN(Series|Movies)Events\(\s*(\d{1,10})\s*,/);
-            if (!favs || !start) return failure(null, 'на сторінці немає плеєра');
-            var results = [], index = 0;
-            (function next() {
-                if (index >= calls.length) return success(results);
-                var call = calls[index++], fields = Object.assign({id: start[2]}, call, {favs: favs});
-                kinopubGet(KINOPUB + '/ajax/get_cdn_series/?t=' + Date.now(), {dataType: 'text', headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
-                    post: Object.keys(fields).map(function (name) { return name + '=' + encodeURIComponent(fields[name]); }).join('&')}, function (answer) {
-                    var data = answer;
-                    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return failure(null, 'сайт не повернув JSON'); } }
-                    results.push(kinopubClean(data));
-                    next();
-                }, failure);
-            })();
-        }, failure);
-    }
-    // One episode (or film) in one voice: the best free HLS row, all free rows as Lampa's quality list, and the subtitles that come with it.
-    function kinopubStream(entry, success, failure) {
-        var ref = entry.ref;
-        var call = ref.film ? {action: 'get_movie', translator_id: ref.tr, is_camrip: ref.camrip || '0', is_ads: ref.ads || '0', is_director: ref.director || '0'}
-            : {action: 'get_stream', translator_id: ref.tr, season: ref.season, episode: ref.episode};
-        kinopubApi(ref.page, [call], function (replies) {
-            var reply = replies[0];
-            if (!reply || reply.success !== true) return failure('KinoPub: ' + (reply && reply.message ? reply.message : 'сайт не віддав відео'));
-            if (reply.premium_content === 1) return failure('KinoPub: це озвучення платне на сайті');
-            var found = kinopubQualities(reply.url);
-            if (!found.best) return failure('KinoPub: на сторінці немає відео, яке можна відкрити');
-            entry.streamAt = Date.now();
-            entry.streamInfo = {height: 0, bandwidth: 0, qualities: found.qualities};
-            entry.streamInfoUrl = found.qualities[found.best];
-            success(found.qualities[found.best], kinopubSubtitles(reply.subtitle));
-        }, function (xhr, why) { failure('KinoPub: ' + kinopubReason(xhr, why)); });
-    }
-    // "Оригінал + субтитри" is a claim of the site's name. The subtitle files the first episode really has decide what the voice is called.
-    var kinopubSubtitleCache = {}, KINOPUB_VERIFY_MS = 8000;
-    function kinopubOriginalLabel(langs) {
-        if (langs.ua) return 'Оригінал + субтитри (' + (langs.ru && russianEnabled() ? 'укр. + рос.' : 'укр.') + ')';
-        if (langs.en) return 'Оригінал + субтитри (англ.)';
-        if (langs.ru && russianEnabled()) return 'Оригінал + субтитри (рос.)';
-        return 'Оригінал, без субтитрів';
-    }
-    function kinopubVerify(pageUrl, seasons, done) {
-        var first = {}, order = [];
-        Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; }).forEach(function (number) {
-            seasons[number].forEach(function (voice) {
-                var episode = voice.kind === 1 && voice.episodes[0];
-                if (episode && !first[episode.ref.tr]) { first[episode.ref.tr] = episode.ref; order.push(episode.ref.tr); }
-            });
-        });
-        order = order.slice(0, 3);
-        var finished = false, timer = null;
-        function apply(langsByTr) {
-            Object.keys(seasons).forEach(function (number) {
-                seasons[number].forEach(function (voice) {
-                    var episode = voice.kind === 1 && voice.episodes[0], langs = episode && langsByTr[episode.ref.tr];
-                    if (langs) voice.label = kinopubOriginalLabel(langs);
-                });
-            });
-        }
-        function finish(langsByTr) { if (finished) return; finished = true; clearTimeout(timer); apply(langsByTr || {}); done(); }
-        var known = {}, ask = [];
-        order.forEach(function (tr) { var cached = kinopubSubtitleCache[pageUrl + ':' + tr]; if (cached) known[tr] = cached; else ask.push(tr); });
-        if (!ask.length) return finish(known);
-        timer = setTimeout(function () { finish(known); }, KINOPUB_VERIFY_MS);
-        kinopubApi(pageUrl, ask.map(function (tr) {
-            var ref = first[tr];
-            return ref.film ? {action: 'get_movie', translator_id: tr, is_camrip: ref.camrip || '0', is_ads: ref.ads || '0', is_director: ref.director || '0'}
-                : {action: 'get_stream', translator_id: tr, season: ref.season, episode: ref.episode};
-        }), function (replies) {
-            ask.forEach(function (tr, index) {
-                var reply = replies[index];
-                if (reply && reply.success === true && reply.premium_content !== 1) known[tr] = kinopubSubtitleCache[pageUrl + ':' + tr] = subtitleLanguages(kinopubSubtitles(reply.subtitle, true));
-            });
-            finish(known);
-        }, function () { finish(known); });
-    }
-    function kinopubStale(entry) { return !!(entry && entry.ref && entry.ref.page && entry.streamAt && Date.now() - entry.streamAt > KINOPUB_STALE); }
-    function kinopubMedia(value) {
-        try { var u = new URL(value); return u.protocol === 'https:' && KINOPUB_CDN.test(u.hostname) && /:hls:manifest\.m3u8$/.test(u.pathname); } catch (e) { return false; }
-    }
-
-    // AnimeOn uses its own public API (the old third-party aggregator is gone and is no longer used).
     // ---- UAFilms: a public catalogue (films.aartzz.pp.ua) that names, by the card's TMDB number, the players of one episode ------------
     // It is used only for that mapping: the Ashdi / zetvideo (UAflix) / Moon page is then read by the same code as everywhere else, and
     // the video comes straight from the hosting, not through UAFilms. Anonymous clients prove a small piece of work (SHA-256 with N
@@ -1519,7 +1275,7 @@
         }).filter(Boolean).sort(function (a, b) { return a.subs - b.subs; }); // the Ukrainian voices first, the subtitled original after them
     }
 
-    var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', bamboo: 'BambooUA', dorama: 'DoramaUA', kinopub: 'KinoPub', anilibria: 'AniLibria (рос.)'};
+    var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', bamboo: 'BambooUA', dorama: 'DoramaUA', anilibria: 'AniLibria (рос.)'};
     // Read the site's public API directly on Android, through the owner's Worker on TVs.
     function animeonApi(action, params, success, failure) {
         var paths = {search: '/anime?search=' + encodeURIComponent(params.q || ''),
@@ -1692,11 +1448,12 @@
             if (browserChallenge(html)) return failure('DoramaUA вимагає перевірку браузера');
             success(html);
         }
-        function failed(xhr) {
+        function whyFailed(xhr) {
             var said = '';
             try { said = JSON.parse(xhr.responseText).error || ''; } catch (e) {}
-            failure(xhr && xhr.status === 404 ? 'онови Worker у Cloudflare для DoramaUA' : said || reason(xhr));
+            return xhr && xhr.status === 404 ? 'онови Worker у Cloudflare для DoramaUA' : said || reason(xhr);
         }
+        function failed(xhr) { failure(whyFailed(xhr)); }
         // Select the network path before the request; a region/access refusal is never retried through another server.
         if (Lampa.Platform && Lampa.Platform.is('android') && Lampa.Reguest) {
             try { return new Lampa.Reguest()['native'](url, done, failed, null, {dataType: 'text', timeout: 20000,
@@ -1704,11 +1461,22 @@
             catch (e) { return failed(e); }
         }
         var params = {id: ref.id, ep: ref.ep, track: ref.track, season: ref.season, seasonParam: ref.seasonParam};
-        if (boxAddress()) return boxRequest('dorama/player', params, 'text', done, function (xhr) { failure(boxReason(xhr)); });
         var query = Object.keys(params).filter(function (key) { return params[key] != null && params[key] !== ''; })
             .map(function (key) { return key + '=' + encodeURIComponent(params[key]); }).join('&');
-        ajaxRetry({url: homeProxy() + '/dorama/player?' + query + '&key=' + encodeURIComponent(homeKey()),
-            dataType: 'text', timeout: 25000, cache: false, success: done, error: failed});
+        function viaWorker(note) {
+            ajaxRetry({url: homeProxy() + '/dorama/player?' + query + '&key=' + encodeURIComponent(homeKey()),
+                dataType: 'text', timeout: 25000, cache: false, success: done, error: function (xhr) {
+                    // The box was tried first and said nothing: its reason travels with the Worker's failure.
+                    failure(note ? note + '; запасний шлях через Worker теж не вдався: ' + whyFailed(xhr) : whyFailed(xhr));
+                }});
+        }
+        if (!boxAddress()) return viaWorker();
+        boxRequest('dorama/player', params, 'text', done, function (xhr) {
+            // The box answered with a reason (a refusal, an error status): that is shown as it is. Only silence (switched off, moved to another
+            // address, a stale one saved in another Lampa) sends the request to the Worker instead.
+            if (xhr && xhr.status) return failure(boxReason(xhr));
+            viaWorker(boxReason(xhr));
+        });
     }
     function doramaInput(doc, id) {
         var input = doc.querySelector('#inputData');
@@ -1966,7 +1734,7 @@
         return !Array.isArray(hidden) || hidden.indexOf(name) < 0;
     }
     function sourceAllowed(name) {
-        return sourceVisible(name) && (!RUSSIAN_SOURCES[name] || russianEnabled()) && (name !== 'kinopub' || kinopubReachable());
+        return sourceVisible(name) && (!RUSSIAN_SOURCES[name] || russianEnabled());
     }
     function sourceSettings() {
         var back = Lampa.Controller.enabled().name;
@@ -2195,7 +1963,7 @@
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source && !!SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source); // a saved source that no longer exists (Makhno) is just forgotten
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
-        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'bamboo', 'dorama', 'kinopub', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'bamboo', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
         if (!sourceAllowed(source)) source = ORDER.filter(sourceAllowed)[0] || '';
         var playSeq = 0, launching = false;
         var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
@@ -2261,7 +2029,7 @@
         // AniTube keeps every season on its own page, so TMDB's season is only matched by the number in the title (or "1" for the first one).
         function tmdbSeason() {
             if (!isTv || !movie.id || !item) return 0;
-            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub') return season;
+            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama') return season;
             if (source === 'animeon') return seasonOf(item) || (item.ref && item.ref.season) || 0;
             return seasonOf(item) || (results.length <= 1 || results.indexOf(item) === 0 ? 1 : 0);
         }
@@ -2422,7 +2190,6 @@
                         {group: 'Фільми, серіали, дорами (укр)', title: 'Klon UA', subtitle: 'Фільми, серіали, аніме', selected: source === 'klon', value: 'klon'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'BambooUA', subtitle: 'Дорами: дубляж і субтитри студії', selected: source === 'bamboo', value: 'bamboo'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'DoramaUA', subtitle: 'Дорами: озвучення, субтитри й автосубтитри', selected: source === 'dorama', value: 'dorama'},
-                        {group: 'Фільми, серіали, дорами (укр)', title: 'KinoPub', subtitle: 'Українські дубляжі й субтитри, де є', selected: source === 'kinopub', value: 'kinopub'},
                         {group: 'Російські', title: 'AniLibria', subtitle: 'Аніме (рос)', selected: source === 'anilibria', value: 'anilibria', ru: true}
                     ]),
                     onBack: function () { Lampa.Controller.toggle('content'); },
@@ -2474,14 +2241,14 @@
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
-            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub') {
+            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama') {
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (numbers.length > 1) {
                     addRow(numbers.map(function (number) {
                         return chip('Сезон ' + number, '', number === season, function () {
                             if (number === season) return;
                             remember(key, {season: number});
-                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub') self.useSourceSeason(number); else self.useSeason(number);
+                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama') self.useSourceSeason(number); else self.useSeason(number);
                         });
                     }));
                 }
@@ -2519,7 +2286,7 @@
             if (!voice) return;
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title, item.title);
-                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub' ? '#s' + season : '') + ':' + (info.number || info.original));
+                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' ? '#s' + season : '') + ':' + (info.number || info.original));
                 return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label, timeline: Lampa.Timeline.view(hash)};
             });
             entries = episodeOrder(entries, false).map(function (index) { return entries[index]; });
@@ -2575,7 +2342,7 @@
         };
 
         this.inspectQuality = function (entry, update, current) {
-            if (!entry || entry.supported === false || entry.quality || entry.qualityQueued || (source === 'dorama' && !entry.stream) || source === 'kinopub') return;
+            if (!entry || entry.supported === false || entry.quality || entry.qualityQueued || (source === 'dorama' && !entry.stream)) return;
             var cached = qualityCache[entry.url];
             if (cached) { entry.quality = cached.height; if (update) update(entry.quality); return; }
             entry.qualityQueued = true;
@@ -2600,7 +2367,7 @@
             });
         }
         function playerFile(entry) {
-            var native = tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(entry.stream || '') || (source === 'dorama' && !!doramaMedia(entry.stream)) || (source === 'kinopub' && kinopubMedia(entry.stream)) || (source === 'bamboo' && bambooMedia(entry.stream)));
+            var native = tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(entry.stream || '') || (source === 'dorama' && !!doramaMedia(entry.stream)) || (source === 'bamboo' && bambooMedia(entry.stream)));
             var file = playbackFile(entry.stream, !moonPage(entry.url) && entry.streamInfoUrl === entry.stream ? entry.streamInfo : null, native);
             file.anitube_source_url = entry.url;
             if (native) { file.hls_type = 'native'; file.anitube_native_prepared = true; }
@@ -2608,8 +2375,7 @@
         }
         function prepareStream(entry, url, done) {
             if (moonPage(entry.url)) return done();
-            if (source === 'kinopub') return done(); // the rows come with the site's answer; reading the manifest again would only replace them
-            if (tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(url) || (source === 'dorama' && !!doramaMedia(url)) || (source === 'kinopub' && kinopubMedia(url)) || (source === 'bamboo' && bambooMedia(url)))) {
+            if (tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(url) || (source === 'dorama' && !!doramaMedia(url)) || (source === 'bamboo' && bambooMedia(url)))) {
                 done(); // Optional quality metadata never delays native playback.
                 inspectStream(entry, url, function (info) {
                     var work = Lampa.Player.playdata && Lampa.Player.playdata();
@@ -2647,22 +2413,51 @@
             }
         }
 
+        // «Пошук»: the card's own names are offered as a list (nothing has to be typed); typing a name by hand stays as the last item.
         this.ask = function () {
+            var seenNames = {};
+            var names = nameTiers(movie, extraTerms).reduce(function (all, tier) { return all.concat(tier); }, []).filter(function (name) {
+                var k = normalize(name);
+                if (!k || seenNames[k]) return false;
+                seenNames[k] = true;
+                return true;
+            });
+            if (!names.length) return self.typeName();
+            var items = names.map(function (name) {
+                return {title: name, subtitle: 'Назва картки', selected: !!manual && normalize(name) === normalize(manual), value: name};
+            });
+            items.push({title: 'Ввести назву вручну', subtitle: 'Так, як вона написана на сайті', typed: true});
+            if (manual) items.push({title: 'Скинути ручну назву', subtitle: 'Знову шукати за всіма назвами картки', reset: true});
+            Lampa.Select.show({
+                title: 'Пошук: обери назву',
+                items: items,
+                onBack: function () { Lampa.Controller.toggle('content'); },
+                onSelect: function (picked) {
+                    Lampa.Controller.toggle('content');
+                    if (picked.typed) return self.typeName();
+                    self.useName(picked.reset ? '' : picked.value);
+                }
+            });
+        };
+        this.typeName = function () {
             Lampa.Input.edit({free: true, title: 'Пошук (порожнє поле скидає ручну назву)', nosave: true, value: manual}, function (value) {
                 Lampa.Controller.toggle('content');
-                value = String(value || '').trim();
-                // An empty entry confirmed with Enter clears the hand-typed name, so the search goes back to the card's own names.
-                if (!value && !manual) return;
-                if (!value) Lampa.Noty.show('Ручну назву скинуто, шукаю за назвами картки');
-                // AniTube often names a show differently from the card, so the title can be typed by hand (and is remembered).
-                manual = value;
-                var queries = Object.assign({}, saved(key).queries || {});
-                if (manual) queries[source] = manual; else delete queries[source];
-                remember(key, {queries: queries, query: '', title: ''});
-                results = []; item = null; voices = [];
-                self.loading(true);
-                self.search(0);
+                self.useName(String(value || '').trim());
             });
+        };
+        // The chosen or typed name is searched for and remembered for this source of this card.
+        this.useName = function (value) {
+            // An empty value clears the chosen name, so the search goes back to the card's own names.
+            if (!value && !manual) return;
+            if (!value) Lampa.Noty.show('Ручну назву скинуто, шукаю за назвами картки');
+            // AniTube often names a show differently from the card, so the title can be chosen or typed (and is remembered).
+            manual = value;
+            var queries = Object.assign({}, saved(key).queries || {});
+            if (manual) queries[source] = manual; else delete queries[source];
+            remember(key, {queries: queries, query: '', title: ''});
+            results = []; item = null; voices = [];
+            self.loading(true);
+            self.search(0);
         };
 
         // 1. find the title on AniTube (the card's own names, then the original ones)
@@ -2751,7 +2546,7 @@
                     fetch: function (q, ok, fail) { fetchText('search', q, function (html) { ok(catalog(html)); }, fail); },
                     failed: function (xhr, why) { return 'AniTube: не вдалося отримати результати пошуку ' + failureText(xhr, why) + '.'; },
                     nothing: function (m) { return m ? 'AniTube: за запитом «' + m + '» нічого не знайдено. Спробуй інше слово через «Пошук» угорі.'
-                        : 'AniTube: за назвою цієї картки нічого не знайдено. Натисни «Пошук» угорі й введи назву так, як вона на AniTube (часто достатньо одного слова).'; }
+                        : 'AniTube: за назвою цієї картки нічого не знайдено. Натисни «Пошук» угорі й обери назву зі списку або введи її так, як вона на AniTube (часто достатньо одного слова).'; }
                 },
                 animeon: {
                     label: 'AnimeOn',
@@ -2796,12 +2591,6 @@
                     fetch: function (q, ok, fail) { doramaApi('/search?text=' + encodeURIComponent(q), function (data) { ok(doramaCatalog(data)); }, fail); },
                     failed: function (xhr) { return 'DoramaUA: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'DoramaUA: ' + where(m) + '. Спробуй назву із сайту через «Пошук».'; }
-                },
-                kinopub: {
-                    label: 'KinoPub', verify: true, strict: true,
-                    fetch: function (q, ok, fail) { kinopubSearchGet(q, function (html) { ok(kinopubCatalog(html)); }, fail); },
-                    failed: function (xhr, why) { return 'KinoPub: не вдалося отримати результати пошуку (' + kinopubReason(xhr, why) + ').'; },
-                    nothing: function (m) { return 'KinoPub: ' + where(m) + '. Спробуй назву із сайту через «Пошук» або інше джерело.'; }
                 },
                 anilibria: {
                     label: 'AniLibria', strict: true, words: true,
@@ -2887,7 +2676,6 @@
             if (source === 'uafix') return this.openUafix();
             if (source === 'animeon') return this.openAnimeon();
             if (source === 'dorama') return this.openDorama();
-            if (source === 'kinopub') return this.openKinopub();
             if (source === 'uafilms') return this.openUafilms();
             if (source === 'uaserials') return this.openUaserials();
             if (source === 'eneyida' || source === 'klon' || source === 'bamboo') return this.openDle(source);
@@ -3069,35 +2857,6 @@
             });
         };
 
-        // KinoPub: the page lists the voices; a series then asks each wanted voice for its seasons and episodes in one go.
-        this.openKinopub = function () {
-            var mine = openSeq;
-            function fail(message) { if (!closed && mine === openSeq && source === 'kinopub') self.empty('KinoPub: ' + message); }
-            function show(found) {
-                if (closed || mine !== openSeq || source !== 'kinopub') return;
-                seasons = found || {};
-                Object.keys(seasons).forEach(function (s) { seasons[s].sort(function (a, b) { return a.kind - b.kind; }); });
-                if (!Object.keys(seasons).length) return fail('не вдалося прочитати список серій.');
-                kinopubVerify(item.url, seasons, function () {
-                    if (closed || mine !== openSeq || source !== 'kinopub') return;
-                    var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
-                    var wanted = saved(key).season;
-                    self.useSourceSeason(numbers.indexOf(wanted) >= 0 ? wanted : numbers[0], true);
-                });
-            }
-            kinopubPageGet(item.url, function (html) {
-                if (closed || mine !== openSeq || source !== 'kinopub') return;
-                var info = kinopubPageInfo(html);
-                if (!info) return fail('на сторінці немає плеєра.');
-                if (!info.voices.length) return fail('для цього тайтлу немає українських озвучень чи субтитрів' + (russianEnabled() ? '.' : ' (російські озвучення можна ввімкнути перемикачем РОС).'));
-                if (!info.series) return show(kinopubSeasons(item.url, info, null));
-                kinopubApi(item.url, info.voices.map(function (voice) { return {action: 'get_episodes', translator_id: voice.tr}; }), function (replies) {
-                    if (closed || mine !== openSeq || source !== 'kinopub') return;
-                    show(kinopubSeasons(item.url, info, replies));
-                }, function (xhr, why) { fail('не вдалося отримати список серій (' + kinopubReason(xhr, why) + ').'); });
-            }, function (xhr, why) { fail('не вдалося відкрити сторінку тайтлу (' + kinopubReason(xhr, why) + ').'); });
-        };
-
         this.openDorama = function () {
             var mine = openSeq;
             doramaApi('/serials/' + encodeURIComponent(item.ref.slug), function (data) {
@@ -3209,8 +2968,7 @@
         // 3. episode list with watch progress; the whole list becomes the player's playlist
         function resolveEntry(entry, success, failure) {
             if (entry.supported === false) return failure('плеєр ' + entry.player + ' поки не підтримується');
-            if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry)) && !kinopubStale(entry)) return success(entry.stream);
-            if (source === 'kinopub') return kinopubStream(entry, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
+            if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry))) return success(entry.stream);
             if (source === 'uafilms' && entry.ref && entry.ref.variant) return uafilmsStream(entry, success, failure);
             if (source === 'uafix') return uafixStream(entry.url, entry.kind, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (source === 'dorama') return doramaStream(entry.ref, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
@@ -3222,7 +2980,7 @@
         }
 
         this.resolve = function (entry, success, failure) {
-            if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry)) && !kinopubStale(entry)) return success(entry.stream);
+            if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry))) return success(entry.stream);
             if (entry.resolving) { entry.resolving.push([success, failure]); return; }
             entry.resolving = [[success, failure]];
             var done = false;
@@ -3258,7 +3016,6 @@
             if (source === 'uafilms') { behind = 0; ahead = 0; }
             if (source === 'animeon') { behind = ANIMEON_BEHIND; ahead = ANIMEON_AHEAD; }
             if (source === 'dorama') { behind = DORAMA_BEHIND; ahead = DORAMA_AHEAD; }
-            if (source === 'kinopub') { behind = KINOPUB_BEHIND; ahead = KINOPUB_AHEAD; }
             var android = Lampa.Platform && Lampa.Platform.is('android');
             var from = android ? Math.max(0, index - behind) : index, to = android ? Math.min(entries.length - 1, index + ahead) : index;
             var pending = to - from + 1, failure = '', selectedFailure = '', failed = [], started = false, grace = null;
@@ -3283,7 +3040,7 @@
                 }
                 try { if (movie.id) Lampa.Favorite.add('history', movie, 100); } catch (e) {}
                 // Lampa's player prints the card's title above the episode; a card without a translation shows the original name.
-                var shown = (item && source !== 'anilibria' && source !== 'kinopub' && item.title) || displayName(); // AniLibria's and KinoPub's own titles are Russian
+                var shown = (item && source !== 'anilibria' && item.title) || displayName(); // AniLibria's own titles are Russian
                 var card = Object.assign({}, movie, {title: shown, name: shown});
                 playbackStatus('', '');
                 var first = Object.assign({title: entry.title, timeline: entry.timeline, card: card, anitube_owner: playbackOwner, anitube_version_shown: true, anitube_moon: !!moonPage(entry.url)}, playerFile(entry));
