@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.16';
+    var VERSION = '2.0.17';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1002,7 +1002,9 @@
     // Nothing of either player is run, no header is made up: Android Lampa asks the sites itself, a TV asks the owner's Worker.
     var DLE_SITES = {
         eneyida: {host: 'eneyida.tv', name: 'Eneyida', page: /^\/\d{1,8}-[a-z0-9-]+\.html$/i},
-        klon: {host: 'klonua.com', name: 'Klon UA', page: /^\/[a-z0-9-]+\/\d{1,8}-[a-z0-9-]+\.html$/i}
+        klon: {host: 'klonua.com', name: 'Klon UA', page: /^\/[a-z0-9-]+\/\d{1,8}-[a-z0-9-]+\.html$/i},
+        // BambooUA (a Ukrainian fan-dub group): its title page states the voices and episodes as plain JSON with direct HLS addresses.
+        bamboo: {host: 'bambooua.com', name: 'BambooUA', page: /^\/(?:dorama|cinema)\/\d{1,8}-[a-z0-9-]+\.html$/i}
     };
     function dleOwn(site, value) {
         try {
@@ -1032,6 +1034,7 @@
     }
     function dleCatalog(site, html) {
         var doc = page(html), seen = {}, base = 'https://' + DLE_SITES[site].host + '/', eneyida = site === 'eneyida';
+        if (site === 'bamboo') return bambooCatalog(doc, base);
         return list(doc, eneyida ? 'article.short' : '.short-news__small-card').map(function (card) {
             var link = card.querySelector(eneyida ? 'a.short_title' : 'a.card-link__style');
             if (!link) return null;
@@ -1049,6 +1052,74 @@
                 note: [year, count || (eneyida ? '' : info.replace(/,?\s*(?:19|20)\d\d\s*рік/, ''))].filter(Boolean).join(' · '), ref: {url: url}};
         }).filter(Boolean);
     }
+    // BambooUA result cards: <article class="swiper-slide"> with the Ukrainian title (h2.label-3), the kinds (.year, not a year) and a.link-title.
+    // The address slug is often the English title, so it is kept as one more name for matching.
+    function bambooCatalog(doc, base) {
+        var seen = {};
+        return list(doc, 'article.swiper-slide').map(function (card) {
+            var link = card.querySelector('a.link-title');
+            if (!link) return null;
+            var url = absolute(link.getAttribute('href'), base), title = text(card.querySelector('.label-3')).replace(/\s+/g, ' ').trim();
+            if (!dleOwn('bamboo', url) || !title || seen[url]) return null;
+            seen[url] = true;
+            var parts = title.split(/\s+\/\s+/).map(function (part) { return part.trim(); }).filter(Boolean);
+            var slug = (url.match(/\/\d+-([a-z0-9-]+)\.html$/i) || [])[1] || '';
+            var kinds = text(card.querySelector('.year')).replace(/\s+/g, ' ').split('/').map(function (part) { return part.trim(); }).filter(Boolean).slice(0, 3).join(' / ');
+            return {title: shortName(parts[0]), names: parts.concat(slug ? [slug.replace(/-/g, ' ')] : []), url: url, year: '', note: kinds, ref: {url: url}};
+        }).filter(Boolean);
+    }
+    // The page keeps "const playlist = [...]" as plain JSON; this reads that array without running anything.
+    function bambooPlaylist(html) {
+        var source = String(html), start = source.search(/\bconst\s+playlist\s*=\s*\[/);
+        if (start < 0) return null;
+        start = source.indexOf('[', start);
+        var depth = 0, quoted = false, escaped = false;
+        for (var i = start; i < source.length; i++) {
+            var c = source.charAt(i);
+            if (quoted) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === '"') quoted = false; continue; }
+            if (c === '"') quoted = true;
+            else if (c === '[') depth++;
+            else if (c === ']' && --depth === 0) {
+                try { var data = JSON.parse(source.slice(start, i + 1)); return Array.isArray(data) ? data : null; } catch (e) { return null; }
+            }
+        }
+        return null;
+    }
+    function bambooMedia(value) {
+        try {
+            var url = new URL(value);
+            return url.protocol === 'https:' && (url.hostname === 'bambooua.com' || /\.bambooua\.com$/.test(url.hostname)) && !url.port && media(String(value));
+        } catch (e) { return false; }
+    }
+    // Voices > episodes of the site's own player. Episodes "for subscribers" are only a placeholder clip (be_sponsors.mp4): they are skipped, never played.
+    function bambooSeasons(html) {
+        var data = bambooPlaylist(html), locked = 0;
+        if (!data) return {seasons: {}, locked: 0};
+        function keep(entries) {
+            return (entries || []).filter(function (entry) { return entry && typeof entry === 'object'; }).map(function (entry) {
+                if (entry.folder) return {title: entry.title, folder: keep(entry.folder)};
+                var file = String(entry.file || '');
+                if (/be_sponsors|підписник/i.test(file + ' ' + String(entry.title || ''))) { locked++; return null; }
+                return bambooMedia(file) ? {title: entry.title, file: file} : null;
+            }).filter(Boolean);
+        }
+        var seasons = voiceSeasons(keep(data));
+        // The Ukrainian dub is listed before the subtitles.
+        Object.keys(seasons).forEach(function (number) {
+            seasons[number].sort(function (a, b) { return (/дубляж|озвуч/i.test(a.label) ? 0 : 1) - (/дубляж|озвуч/i.test(b.label) ? 0 : 1); });
+        });
+        return {seasons: seasons, locked: locked};
+    }
+    // A title whose files live on Ashdi lists every voice of that player: only the ones the group itself uploaded are wanted.
+    function bambooOwnVoices(found) {
+        var kept = {}, any = false;
+        Object.keys(found || {}).forEach(function (number) {
+            var voices = found[number].filter(function (voice) { return /bambooua/i.test(voice.label); });
+            if (voices.length) { kept[number] = voices; any = true; }
+        });
+        return any ? kept : found;
+    }
+
     // The first player of a title page that can be read: Ashdi (serial or film page) before HDVB.
     function dlePlayers(html) {
         var found = [], pattern = /\b(?:data-src|src)=["'](https:\/\/(?:ashdi\.vip\/(?:serial|vod)\/\d{1,10}(?=[?"'])|hdvbua\.pro\/(?:embd|vid)\/\d{1,10}(?=["'])))(?:\?[^"']*)?["']/gi, match; // HDVB's "?tr=1" iframe is a trailer: not matched
@@ -1448,7 +1519,7 @@
         }).filter(Boolean).sort(function (a, b) { return a.subs - b.subs; }); // the Ukrainian voices first, the subtitled original after them
     }
 
-    var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', dorama: 'DoramaUA', kinopub: 'KinoPub', anilibria: 'AniLibria (рос.)'};
+    var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', bamboo: 'BambooUA', dorama: 'DoramaUA', kinopub: 'KinoPub', anilibria: 'AniLibria (рос.)'};
     // Read the site's public API directly on Android, through the owner's Worker on TVs.
     function animeonApi(action, params, success, failure) {
         var paths = {search: '/anime?search=' + encodeURIComponent(params.q || ''),
@@ -2124,7 +2195,7 @@
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source && !!SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source); // a saved source that no longer exists (Makhno) is just forgotten
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
-        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'dorama', 'kinopub', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'bamboo', 'dorama', 'kinopub', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
         if (!sourceAllowed(source)) source = ORDER.filter(sourceAllowed)[0] || '';
         var playSeq = 0, launching = false;
         var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
@@ -2190,7 +2261,7 @@
         // AniTube keeps every season on its own page, so TMDB's season is only matched by the number in the title (or "1" for the first one).
         function tmdbSeason() {
             if (!isTv || !movie.id || !item) return 0;
-            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'dorama' || source === 'kinopub') return season;
+            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub') return season;
             if (source === 'animeon') return seasonOf(item) || (item.ref && item.ref.season) || 0;
             return seasonOf(item) || (results.length <= 1 || results.indexOf(item) === 0 ? 1 : 0);
         }
@@ -2349,6 +2420,7 @@
                         {group: 'Фільми, серіали, дорами (укр)', title: 'UA Serials', subtitle: 'Фільми, серіали, дорами, аніме', selected: source === 'uaserials', value: 'uaserials'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'Eneyida', subtitle: 'Фільми, серіали, аніме', selected: source === 'eneyida', value: 'eneyida'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'Klon UA', subtitle: 'Фільми, серіали, аніме', selected: source === 'klon', value: 'klon'},
+                        {group: 'Фільми, серіали, дорами (укр)', title: 'BambooUA', subtitle: 'Дорами: дубляж і субтитри студії', selected: source === 'bamboo', value: 'bamboo'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'DoramaUA', subtitle: 'Дорами: озвучення, субтитри й автосубтитри', selected: source === 'dorama', value: 'dorama'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'KinoPub', subtitle: 'Українські дубляжі й субтитри, де є', selected: source === 'kinopub', value: 'kinopub'},
                         {group: 'Російські', title: 'AniLibria', subtitle: 'Аніме (рос)', selected: source === 'anilibria', value: 'anilibria', ru: true}
@@ -2402,14 +2474,14 @@
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
-            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'dorama' || source === 'kinopub') {
+            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub') {
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (numbers.length > 1) {
                     addRow(numbers.map(function (number) {
                         return chip('Сезон ' + number, '', number === season, function () {
                             if (number === season) return;
                             remember(key, {season: number});
-                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'dorama' || source === 'kinopub') self.useSourceSeason(number); else self.useSeason(number);
+                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub') self.useSourceSeason(number); else self.useSeason(number);
                         });
                     }));
                 }
@@ -2447,7 +2519,7 @@
             if (!voice) return;
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title, item.title);
-                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'dorama' || source === 'kinopub' ? '#s' + season : '') + ':' + (info.number || info.original));
+                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' || source === 'kinopub' ? '#s' + season : '') + ':' + (info.number || info.original));
                 return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label, timeline: Lampa.Timeline.view(hash)};
             });
             entries = episodeOrder(entries, false).map(function (index) { return entries[index]; });
@@ -2528,7 +2600,7 @@
             });
         }
         function playerFile(entry) {
-            var native = tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(entry.stream || '') || (source === 'dorama' && !!doramaMedia(entry.stream)) || (source === 'kinopub' && kinopubMedia(entry.stream)));
+            var native = tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(entry.stream || '') || (source === 'dorama' && !!doramaMedia(entry.stream)) || (source === 'kinopub' && kinopubMedia(entry.stream)) || (source === 'bamboo' && bambooMedia(entry.stream)));
             var file = playbackFile(entry.stream, !moonPage(entry.url) && entry.streamInfoUrl === entry.stream ? entry.streamInfo : null, native);
             file.anitube_source_url = entry.url;
             if (native) { file.hls_type = 'native'; file.anitube_native_prepared = true; }
@@ -2537,7 +2609,7 @@
         function prepareStream(entry, url, done) {
             if (moonPage(entry.url)) return done();
             if (source === 'kinopub') return done(); // the rows come with the site's answer; reading the manifest again would only replace them
-            if (tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(url) || (source === 'dorama' && !!doramaMedia(url)) || (source === 'kinopub' && kinopubMedia(url)))) {
+            if (tvPlatform() && (/^https:\/\/ashdi\.vip\//i.test(url) || (source === 'dorama' && !!doramaMedia(url)) || (source === 'kinopub' && kinopubMedia(url)) || (source === 'bamboo' && bambooMedia(url)))) {
                 done(); // Optional quality metadata never delays native playback.
                 inspectStream(entry, url, function (info) {
                     var work = Lampa.Player.playdata && Lampa.Player.playdata();
@@ -2713,6 +2785,12 @@
                     failed: function (xhr) { return 'Klon UA: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'Klon UA: ' + where(m) + '. Спробуй інше слово через «Пошук» або інше джерело.'; }
                 },
+                bamboo: {
+                    label: 'BambooUA', verify: true, strict: true,
+                    fetch: function (q, ok, fail) { dleGet('bamboo', 'search', q, function (html) { ok(dleCatalog('bamboo', html)); }, fail); },
+                    failed: function (xhr) { return 'BambooUA: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    nothing: function (m) { return 'BambooUA: ' + where(m) + '. Спробуй назву із сайту через «Пошук» або інше джерело.'; }
+                },
                 dorama: {
                     label: 'DoramaUA', verify: true, strict: true,
                     fetch: function (q, ok, fail) { doramaApi('/search?text=' + encodeURIComponent(q), function (data) { ok(doramaCatalog(data)); }, fail); },
@@ -2812,7 +2890,7 @@
             if (source === 'kinopub') return this.openKinopub();
             if (source === 'uafilms') return this.openUafilms();
             if (source === 'uaserials') return this.openUaserials();
-            if (source === 'eneyida' || source === 'klon') return this.openDle(source);
+            if (source === 'eneyida' || source === 'klon' || source === 'bamboo') return this.openDle(source);
             if (source === 'anilibria') return this.openAnilibria();
             fetchPlaylist(item.url, function (data) {
                 if (closed || mine !== openSeq) return;
@@ -2947,14 +3025,20 @@
             function failed(why) { if (!closed && mine === openSeq) self.empty(label + ': не вдалося прочитати плеєр (' + why + ').'); }
             dleGet(site, 'page', item.url, function (html) {
                 if (closed || mine !== openSeq) return;
+                if (site === 'bamboo') {
+                    var own = bambooSeasons(html);
+                    if (Object.keys(own.seasons).length) return show(own.seasons);
+                    if (own.locked) return self.empty(label + ': усі наявні серії цього тайтлу доступні лише підписникам сайту.');
+                }
                 var player = dlePlayers(html)[0];
-                if (!player) return self.empty(label + ': на сторінці немає плеєра Ashdi чи HDVB, який можна відкрити.');
+                if (!player) return self.empty(label + ': на сторінці немає плеєра, який можна відкрити.');
                 if (/^https:\/\/ashdi\.vip\//.test(player)) {
                     ashdiHtml(player, function (page) {
                         if (closed || mine !== openSeq) return;
                         if (ashdiMissing(page)) return self.empty(label + ': Ashdi більше не має цього файлу.');
                         var data = ashdiPlaylist(page);
-                        show(data.length ? playlistSeasons(data) : {1: [{label: 'Ashdi', episodes: [{title: /\/serial\//.test(player) ? 'Серія 1' : 'Фільм', url: player, subs: []}]}]});
+                        var found = data.length ? playlistSeasons(data) : {1: [{label: 'Ashdi', episodes: [{title: /\/serial\//.test(player) ? 'Серія 1' : 'Фільм', url: player, subs: []}]}]};
+                        show(site === 'bamboo' ? bambooOwnVoices(found) : found);
                     }, function (why) { failed(reason(why)); });
                 } else {
                     dleGet(site, 'player', player, function (page) { show(hdvbSeasons(page)); }, function (xhr) { failed(xhr && xhr.status ? 'HTTP ' + xhr.status : 'немає відповіді'); });

@@ -28,9 +28,9 @@
 //   GET /uaserials/page?url=<page>&key=<key>   one UA Serials title page (HTML)
 //   GET /uaserials/player?url=<page>&key=<key> one public HDVB iframe page (HTML)
 //
-// Eneyida and Klon UA (DLE catalogues) and the public HDVB player page Eneyida embeds (no Referer, no made-up header).
-//   GET /dle/<eneyida|klon>/search?q=<text>&key=<key>  the site's search page (HTML)
-//   GET /dle/<eneyida|klon>/page?url=<page>&key=<key>  one title page of that site (HTML)
+// Eneyida, Klon UA and BambooUA (DLE catalogues) and the public HDVB player page Eneyida embeds (no Referer, no made-up header).
+//   GET /dle/<eneyida|klon|bamboo>/search?q=<text>&key=<key>  the site's search page (HTML)
+//   GET /dle/<eneyida|klon|bamboo>/page?url=<page>&key=<key>  one title page of that site (HTML)
 //   GET /dle/eneyida/player?url=<page>&key=<key>       https://hdvbua.pro/embd/<id> (a show) or /vid/<id> (a film) (HTML)
 //
 // Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
@@ -259,7 +259,8 @@ async function uaserialsPlayer(raw) {
 // Eneyida and Klon UA (DLE catalogues) and the HDVB player page Eneyida embeds. No Referer and no made-up header is sent.
 const DLE_SITES = {
   eneyida: { host: 'eneyida.tv', page: /^\/[0-9]{1,8}-[a-z0-9-]+\.html$/i },
-  klon: { host: 'klonua.com', page: /^\/[a-z0-9-]+\/[0-9]{1,8}-[a-z0-9-]+\.html$/i }
+  klon: { host: 'klonua.com', page: /^\/[a-z0-9-]+\/[0-9]{1,8}-[a-z0-9-]+\.html$/i },
+  bamboo: { host: 'bambooua.com', page: /^\/(?:dorama|cinema)\/[0-9]{1,8}-[a-z0-9-]+\.html$/i }
 };
 const HDVB_EMBED = /^\/(?:embd|vid)\/[0-9]{1,10}$/;
 
