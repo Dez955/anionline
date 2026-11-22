@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.20';
+    var VERSION = '2.0.21';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -2135,6 +2135,9 @@
         };
 
         // The header and the chips are always drawn; below them come the message, the choice of title or the episodes.
+        // A film has one "episode": the count is only told for series.
+        function countNote(v) { return (isTv || v.episodes.length > 1) ? 'Серій: ' + v.episodes.length : ''; }
+
         this.draw = function (message) {
             if (closed) return;
             var current = ++token;
@@ -2190,7 +2193,7 @@
                         title: 'Озвучення / субтитри',
                         items: voices.filter(function (v, index) { return voices.findIndex(function (x) { return x.label === v.label; }) === index; }).map(function (v) {
                             var opens = voiceFor(v.label);
-                            return {title: v.label, subtitle: 'Серій: ' + voices[opens].episodes.length + voiceSubtitleNote(voices[opens]), selected: v.label === voice.label, index: opens};
+                            return {title: v.label, subtitle: countNote(voices[opens]) + voiceSubtitleNote(voices[opens]).replace(/^ · /, countNote(voices[opens]) ? ' · ' : ''), selected: v.label === voice.label, index: opens};
                         }),
                         onBack: function () { Lampa.Controller.toggle('content'); },
                         onSelect: function (picked) {
@@ -2208,7 +2211,7 @@
                 playerColumn = first.length;
                 first.push(chip('Плеєр', voice.player, false, function () {
                     Lampa.Select.show({title: 'Плеєр · ' + voice.label,
-                        items: voices.map(function (v, index) { return {title: v.player, subtitle: (v.supported === false ? 'Не підтримується · ' : '') + 'Серій: ' + v.episodes.length, selected: index === voiceIndex, index: index, label: v.label}; }).filter(function (v) { return v.label === voice.label; }),
+                        items: voices.map(function (v, index) { return {title: v.player, subtitle: [v.supported === false ? 'Не підтримується' : '', countNote(v)].filter(Boolean).join(' · '), selected: index === voiceIndex, index: index, label: v.label}; }).filter(function (v) { return v.label === voice.label; }),
                         onBack: function () { Lampa.Controller.toggle('content'); },
                         onSelect: function (picked) {
                             playbackMessage = '';
