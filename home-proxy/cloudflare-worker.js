@@ -32,6 +32,11 @@
 //   GET /dle/<eneyida|klon|bamboo>/search?q=<text>&key=<key>  the site's search page (HTML)
 //   GET /dle/<eneyida|klon|bamboo>/page?url=<page>&key=<key>  one title page of that site (HTML)
 //   GET /dle/eneyida/player?url=<page>&key=<key>       https://hdvbua.pro/embd/<id> (a show) or /vid/<id> (a film) (HTML)
+//   GET /kodik/search?site=yummy|jutsu&q=<text>&key=<key>  one catalogue search page (HTML)
+//   GET /kodik/page?site=yummy|jutsu&url=<page>&key=<key>  one catalogue title page (HTML)
+//   GET /kodik/player?site=yummy|jutsu&url=<page>&key=<key> public Kodik player URL from the title page controller (JSON)
+//   GET /kodik/embed?site=yummy|jutsu&url=<kodik-page>&ref=<title-page>&key=<key> Kodik's public stream selector (HTML)
+//   POST /kodik/ftor?key=<key>  passes the selected episode's page-issued form fields to Kodik (JSON)
 //
 // Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
 // from somewhere Ashdi accepts, add a plain-text variable EMBED_URL = the address of the bot's proxy, e.g.
@@ -263,6 +268,83 @@ const DLE_SITES = {
   bamboo: { host: 'bambooua.com', page: /^\/(?:dorama|cinema)\/[0-9]{1,8}-[a-z0-9-]+\.html$/i }
 };
 const HDVB_EMBED = /^\/(?:embd|vid)\/[0-9]{1,10}$/;
+const KODIK_SITES = {
+  yummy: { host: 'yummyanime.tv', page: /^\/[0-9]{1,8}-[a-z0-9-]+\.html$/i },
+  jutsu: { host: 'jut-su.net', page: /^\/[0-9]{1,8}-[a-z0-9-]+\.html$/i }
+};
+const KODIK_PLAYER = /^\/(?:serial|video)\/[0-9]{1,10}\/[a-f0-9]{16,64}\/[0-9]{3,4}p$/i;
+
+function validKodikPlayer(raw) {
+  return validPage(raw, 'kodikplayer.com', KODIK_PLAYER);
+}
+
+async function kodikRoute(action, params, request) {
+  if (action === 'ftor') {
+    if (!request || request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    let body;
+    try { body = JSON.parse(await request.text()); } catch (e) { return json({ error: 'invalid_json' }, 400); }
+    const embed = validKodikPlayer(body && body.embedUrl || '');
+    const fields = body && body.form;
+    const allowed = ['d', 'd_sign', 'pd', 'pd_sign', 'ref', 'ref_sign', 'bad_user', 'cdn_is_working', 'type', 'id', 'hash', 'isUpdate', 'advert_debug', 'min_age', 'first_url'];
+    if (!embed || !fields || typeof fields !== 'object' || Array.isArray(fields) || !/^seria$/.test(String(fields.type || '')) || !/^\d{1,12}$/.test(String(fields.id || '')) || !/^[a-f0-9]{16,64}$/i.test(String(fields.hash || '')) || !fields.d_sign || !fields.pd_sign || !fields.ref_sign) return json({ error: 'invalid_kodik_request' }, 400);
+    const form = new URLSearchParams();
+    for (const key of allowed) {
+      if (fields[key] === undefined || fields[key] === null) continue;
+      const value = String(fields[key]);
+      if (value.length > 200) return json({ error: 'invalid_kodik_request' }, 400);
+      form.set(key, value);
+    }
+    const response = await fetch('https://kodikplayer.com/ftor', { method: 'POST', redirect: 'manual', headers: {
+      'User-Agent': USER_AGENT, 'Accept': 'application/json, text/javascript, */*; q=0.01', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'Referer': embed
+    }, body: form.toString() });
+    const raw = await read(response);
+    let data;
+    try { data = JSON.parse(raw); } catch (e) { throw new UpstreamError('Kodik \u043f\u043e\u0432\u0435\u0440\u043d\u0443\u0432 \u043d\u0435\u043a\u043e\u0440\u0435\u043a\u0442\u043d\u0443 \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0434\u044c'); }
+    return json(data);
+  }
+
+  const site = KODIK_SITES[params.get('site') || ''];
+  if (!site) return json({ error: 'invalid_kodik_site' }, 400);
+  const root = 'https://' + site.host + '/';
+  if (action === 'search') {
+    const query = (params.get('q') || '').trim();
+    if (!query || query.length > 200) return json({ error: 'invalid_query' }, 400);
+    const form = new URLSearchParams({ do: 'search', subaction: 'search', story: query });
+    return html(await read(await fetch(root, { method: 'POST', redirect: 'manual', headers: {
+      'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': root
+    }, body: form.toString() })));
+  }
+  if (action === 'page') {
+    const page = validPage(params.get('url') || '', site.host, site.page);
+    return page ? html(await read(await plainGet(page))) : json({ error: 'invalid_kodik_page' }, 400);
+  }
+  if (action === 'player') {
+    const page = validPage(params.get('url') || '', site.host, site.page);
+    if (!page) return json({ error: 'invalid_kodik_page' }, 400);
+    const id = (new URL(page).pathname.match(/^\/([0-9]+)-/) || [])[1] || '';
+    if (!id) return json({ error: 'invalid_kodik_page' }, 400);
+    const url = new URL('/engine/ajax/controller.php', root);
+    url.searchParams.set('mod', 'player'); url.searchParams.set('id', id); url.searchParams.set('slot', '1');
+    const raw = await read(await fetch(url.href, { redirect: 'manual', headers: {
+      'User-Agent': USER_AGENT, 'Accept': 'application/json, text/javascript, */*; q=0.01', 'Referer': page
+    } }));
+    let data;
+    try { data = JSON.parse(raw); } catch (e) { throw new UpstreamError('Kodik \u043d\u0435 \u0432\u0456\u0434\u0434\u0430\u0432 \u0434\u0430\u043d\u0456 \u043f\u043b\u0435\u0454\u0440\u0430'); }
+    const player = data && data.data && validKodikPlayer(data.data.src);
+    if (!data || !data.status || !player) throw new UpstreamError('Kodik \u043d\u0435 \u0432\u0456\u0434\u0434\u0430\u0432 \u043f\u043b\u0435\u0454\u0440');
+    return json(data);
+  }
+  if (action === 'embed') {
+    const embed = validKodikPlayer(params.get('url') || '');
+    const ref = validPage(params.get('ref') || '', site.host, site.page);
+    if (!embed || !ref) return json({ error: 'invalid_kodik_embed' }, 400);
+    return html(await read(await fetch(embed, { redirect: 'manual', headers: {
+      'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Referer': ref
+    } })));
+  }
+  return null;
+}
 
 function plainGet(url) {
   return fetch(url, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8' } });
@@ -442,7 +524,7 @@ export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: HEADERS });
     const url = new URL(request.url);
-    if (request.method !== 'GET' && !(request.method === 'POST' && (url.pathname === '/sync' || url.pathname === '/uf/login'))) return json({ error: 'method_not_allowed' }, 405);
+    if (request.method !== 'GET' && !(request.method === 'POST' && (url.pathname === '/sync' || url.pathname === '/uf/login' || url.pathname === '/kodik/ftor'))) return json({ error: 'method_not_allowed' }, 405);
     if (url.pathname === '/health') return json({ ok: true });
     const key = String((env && env.ACCESS_KEY) || '').trim();
     if (key.length < MIN_KEY_LENGTH) return json({ error: 'not_configured' }, 503);
@@ -485,6 +567,11 @@ export default {
       const dle = url.pathname.match(/^\/dle\/([a-z]+)\/(search|page|player)$/);
       if (dle) {
         const answer = await dleRoute(dle[1], dle[2], url.searchParams);
+        if (answer) return answer;
+      }
+      const kodik = url.pathname.match(/^\/kodik\/(search|page|player|embed|ftor)$/);
+      if (kodik) {
+        const answer = await kodikRoute(kodik[1], url.searchParams, request);
         if (answer) return answer;
       }
       return json({ error: 'not_found' }, 404);

@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.21';
+    var VERSION = '2.0.22';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1020,6 +1020,170 @@
         // BambooUA (a Ukrainian fan-dub group): its title page states the voices and episodes as plain JSON with direct HLS addresses.
         bamboo: {host: 'bambooua.com', name: 'BambooUA', page: /^\/(?:dorama|cinema)\/\d{1,8}-[a-z0-9-]+\.html$/i}
     };
+    // YummyAnime and Jut-su expose the same Kodik slot through their own public page controller.
+    // The source list combines both catalogues and removes duplicate title/year rows.
+    var KODIK_SITES = {
+        yummy: {host: 'yummyanime.tv', name: 'YummyAnime', page: /^\/\d{1,8}-[a-z0-9-]+\.html$/i, card: '.movie-item', link: 'a.movie-item__link', title: '.movie-item__title', year: '.movie-item__meta'},
+        jutsu: {host: 'jut-su.net', name: 'Jut-su', page: /^\/\d{1,8}-[a-z0-9-]+\.html$/i, card: '.jutsu-item', link: 'a.jutsu-item__title', title: '.jutsu-item__title', year: '.jutsu-item__subtitle'}
+    };
+    function kodikOwn(site, value) {
+        try {
+            var url = new URL(value), rule = KODIK_SITES[site];
+            return !!rule && url.protocol === 'https:' && url.hostname === rule.host && !url.port && !url.search && !url.hash && rule.page.test(url.pathname);
+        } catch (e) { return false; }
+    }
+    function kodikEmbed(value) {
+        try {
+            var url = new URL(value);
+            return url.protocol === 'https:' && url.hostname === 'kodikplayer.com' && !url.port && !url.search && !url.hash && /^\/(?:serial|video)\/\d{1,10}\/[a-f\d]{16,64}\/\d{3,4}p$/i.test(url.pathname);
+        } catch (e) { return false; }
+    }
+    function kodikCatalog(site, html) {
+        var rule = KODIK_SITES[site];
+        if (!rule) return [];
+        var doc = page(html), seen = {};
+        return list(doc, rule.card).map(function (card) {
+            var link = card.querySelector(rule.link);
+            if (!link) return null;
+            var url = absolute(link.getAttribute('href'), 'https://' + rule.host + '/');
+            var title = text(card.querySelector(rule.title)).replace(/\s+/g, ' ').trim();
+            var yearText = text(card.querySelector(rule.year));
+            var year = (yearText.match(/\b(?:19|20)\d{2}\b/) || [])[0] || '';
+            var id = (new URL(url).pathname.match(/^\/(\d+)-/) || [])[1] || '';
+            if (!kodikOwn(site, url) || !id || !title || seen[url]) return null;
+            seen[url] = true;
+            return {title: shortName(title), names: [title], url: url, year: year, note: [year, rule.name].filter(Boolean).join(' · '),
+                ref: {pages: [{site: site, url: url, id: id}]}};
+        }).filter(Boolean);
+    }
+    function kodikCombineCatalogs(left, right) {
+        var merged = {}, out = [];
+        (left || []).concat(right || []).forEach(function (result) {
+            var key = normalize(result.title) + '|' + (result.year || ''), current = merged[key];
+            if (!current) {
+                current = Object.assign({}, result, {names: (result.names || []).slice(), ref: {pages: (result.ref && result.ref.pages || []).slice()}});
+                merged[key] = current; out.push(current); return;
+            }
+            (result.names || []).forEach(function (name) { if (current.names.indexOf(name) < 0) current.names.push(name); });
+            (result.ref && result.ref.pages || []).forEach(function (page) {
+                if (!current.ref.pages.some(function (old) { return old.url === page.url; })) current.ref.pages.push(page);
+            });
+            current.note = (current.year ? current.year + ' · ' : '') + current.ref.pages.map(function (page) { return KODIK_SITES[page.site].name; }).join(' / ');
+        });
+        return out;
+    }
+    function kodikPageData(html, playerUrl) {
+        var doc = page(html), paramsMatch = String(html || '').match(/\bvar\s+urlParams\s*=\s*((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))\s*;/);
+        if (!paramsMatch || !kodikEmbed(playerUrl)) return {};
+        var params;
+        try { params = JSON.parse(jsString(paramsMatch[1])); } catch (e) { return {}; }
+        if (!params || typeof params !== 'object' || !params.d || !params.d_sign || !params.pd || !params.pd_sign) return {};
+        var seasonOptions = list(doc, '.serial-seasons-box option[data-serial-id][data-serial-hash]'), seasons = {};
+        seasonOptions.forEach(function (option) {
+            var number = parseInt(option.getAttribute('value'), 10), match = String(option.className || '').match(/season-(\d+)/);
+            if (!number || number > 999) return;
+            var block = doc.querySelector('.series-options .season-' + number);
+            var episodes = list(block || doc.querySelector('.serial-series-box'), 'option[data-id][data-hash]').map(function (episode) {
+                var id = episode.getAttribute('data-id'), hash = episode.getAttribute('data-hash'), title = episode.getAttribute('data-title') || text(episode);
+                if (!/^\d{1,12}$/.test(id || '') || !/^[a-f\d]{16,64}$/i.test(hash || '')) return null;
+                return {title: title || 'Серія', url: playerUrl + '#s' + number + '-' + id,
+                    ref: {kind: 'seria', id: id, hash: hash, embedUrl: playerUrl, params: params}};
+            }).filter(Boolean);
+            if (!episodes.length) return;
+            var label = option.getAttribute('data-translation-title') || params.translationTitle || 'Kodik';
+            seasons[number] = [{label: label, player: 'Kodik', episodes: episodes}];
+        });
+        // Film pages use a separate Kodik player layout; do not guess their IDs from a serial page.
+        return {seasons: seasons, selected: parseInt((doc.querySelector('.serial-seasons-box option[selected]') || {}).value, 10) || 1};
+    }
+    function kodikDecode(value) {
+        try {
+            var encoded = String(value || '').replace(/[a-z]/gi, function (letter) {
+                var code = letter.charCodeAt(0) + 18, max = letter <= 'Z' ? 90 : 122;
+                return String.fromCharCode(code <= max ? code : code - 26);
+            });
+            return atob(encoded);
+        } catch (e) { return ''; }
+    }
+    function kodikStreamUrl(data) {
+        var links = data && data.links || {}, qualities = Object.keys(links).filter(function (name) { return /^\d{3,4}$/.test(name) && +name <= 1080; })
+            .sort(function (a, b) { return +b - +a; });
+        for (var i = 0; i < qualities.length; i++) {
+            var rows = links[qualities[i]] || [];
+            for (var n = 0; n < rows.length; n++) {
+                var url = kodikDecode(rows[n] && rows[n].src);
+                try {
+                    var parsed = new URL(url);
+                    if (parsed.protocol === 'https:' && /(?:^|\.)(?:solodcdn\.com|kodik-cdn\.com)$/.test(parsed.hostname) && /\.m3u8(?:[?#]|$)/i.test(parsed.pathname + parsed.search)) {
+                        return {url: url, quality: +qualities[i]};
+                    }
+                } catch (e) {}
+            }
+        }
+        if (data && typeof data.link === 'string') {
+            try {
+                var fallback = new URL(data.link);
+                if (fallback.protocol === 'https:' && /(?:^|\.)(?:solodcdn\.com|kodik-cdn\.com)$/.test(fallback.hostname) && /\.m3u8(?:[?#]|$)/i.test(fallback.pathname + fallback.search)) return {url: data.link, quality: 0};
+            } catch (e) {}
+        }
+        return null;
+    }
+    // The relay uses the actual title page as Referer because both catalogues require it for their player controller.
+    // TVs use the owner's Worker for CORS; Android can ask the public pages directly through Lampa.Reguest.
+    function kodikRequest(action, args, success, failure) {
+        args = args || {};
+        var android = !!(window.Lampa && Lampa.Platform && Lampa.Platform.is('android'));
+        var dataType = action === 'player' || action === 'ftor' ? 'json' : 'text';
+        function fail(xhr) { if (failure) failure(xhr); }
+        function received(value) {
+            if (dataType === 'json' && typeof value === 'string') {
+                try { value = JSON.parse(value); } catch (e) { return fail(null); }
+            }
+            success(value);
+        }
+        if (action === 'search' || action === 'page' || action === 'player') {
+            var site = args.site, rule = KODIK_SITES[site];
+            if (!rule) return fail(null);
+            if (action === 'search' && (!args.q || String(args.q).length > 200)) return fail(null);
+            if ((action === 'page' || action === 'player') && !kodikOwn(site, args.url)) return fail(null);
+            if (action === 'player' && !/^\d{1,10}$/.test(String(args.id || ''))) return fail(null);
+        }
+        if (action === 'embed' && (!kodikEmbed(args.url) || !args.ref || !/^(?:yummy|jutsu)$/.test(args.site || ''))) return fail(null);
+        if (action === 'ftor' && (!kodikEmbed(args.embedUrl) || !args.form || typeof args.form !== 'object')) return fail(null);
+
+        if (android) {
+            var address = '', options = {dataType: dataType, headers: {}};
+            if (action === 'search') {
+                address = 'https://' + KODIK_SITES[args.site].host + '/';
+                options.post = 'do=search&subaction=search&story=' + encodeURIComponent(args.q);
+                options.headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Referer': address};
+            } else if (action === 'page') {
+                address = args.url; options.headers = {'Referer': ''};
+            } else if (action === 'player') {
+                address = 'https://' + KODIK_SITES[args.site].host + '/engine/ajax/controller.php?mod=player&id=' + encodeURIComponent(args.id) + '&slot=1';
+                options.headers = {'Referer': args.url};
+            } else if (action === 'embed') {
+                address = args.url; options.headers = {'Referer': args.ref};
+            } else if (action === 'ftor') {
+                address = 'https://kodikplayer.com/ftor';
+                options.post = Object.keys(args.form).map(function (key) { return encodeURIComponent(key) + '=' + encodeURIComponent(args.form[key]); }).join('&');
+                options.headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Referer': args.embedUrl};
+            } else return fail(null);
+            return direct(address, options, received, fail);
+        }
+
+        var query = [], path = '/kodik/' + action;
+        Object.keys(args).forEach(function (key) {
+            if (key === 'form') return;
+            if (args[key] !== undefined && args[key] !== null && args[key] !== '') query.push(encodeURIComponent(key) + '=' + encodeURIComponent(args[key]));
+        });
+        if (action === 'ftor') {
+            return ajaxRetry({url: homeProxy() + path + (homeKey() ? '?key=' + encodeURIComponent(homeKey()) : ''), type: 'POST', contentType: 'application/json',
+                data: JSON.stringify({embedUrl: args.embedUrl, form: args.form}), dataType: 'json', timeout: 25000, cache: false, success: success, error: fail});
+        }
+        if (homeKey()) query.push('key=' + encodeURIComponent(homeKey()));
+        return ajaxRetry({url: homeProxy() + path + (query.length ? '?' + query.join('&') : ''), dataType: dataType, timeout: 25000, cache: false, success: success, error: fail});
+    }
     function dleOwn(site, value) {
         try {
             var url = new URL(value), rule = DLE_SITES[site];
@@ -1289,7 +1453,7 @@
         }).filter(Boolean).sort(function (a, b) { return a.subs - b.subs; }); // the Ukrainian voices first, the subtitled original after them
     }
 
-    var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', bamboo: 'BambooUA', dorama: 'DoramaUA', anilibria: 'AniLibria (рос.)'};
+    var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', bamboo: 'BambooUA', kodik: 'Kodik (YummyAnime / Jut-su)', dorama: 'DoramaUA', anilibria: 'AniLibria (рос.)'};
     // Read the site's public API directly on Android, through the owner's Worker on TVs.
     function animeonApi(action, params, success, failure) {
         var paths = {search: '/anime?search=' + encodeURIComponent(params.q || ''),
@@ -1736,7 +1900,7 @@
     var CHEVRON = '<svg class="atp-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="m3 6 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2"></path></svg>';
     var CHECK = '<svg class="atp-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="m2 8 4 4 8-8" fill="none" stroke="currentColor" stroke-width="2"></path></svg>';
     // Sources with a Russian voice-over are hidden until Settings -> AniTube -> "Показувати російські джерела" is switched on.
-    var RUSSIAN_SOURCES = {anilibria: true};
+    var RUSSIAN_SOURCES = {kodik: true, anilibria: true};
     function russianEnabled() {
         try {
             var value = Lampa.Storage.field('anitube_russian');
@@ -1977,7 +2141,7 @@
         // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
         var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source && !!SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source); // a saved source that no longer exists (Makhno) is just forgotten
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
-        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'bamboo', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
+        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'bamboo', 'kodik', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
         if (!sourceAllowed(source)) source = ORDER.filter(sourceAllowed)[0] || '';
         var playSeq = 0, launching = false;
         var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
@@ -2043,7 +2207,7 @@
         // AniTube keeps every season on its own page, so TMDB's season is only matched by the number in the title (or "1" for the first one).
         function tmdbSeason() {
             if (!isTv || !movie.id || !item) return 0;
-            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama') return season;
+            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'kodik' || source === 'dorama') return season;
             if (source === 'animeon') return seasonOf(item) || (item.ref && item.ref.season) || 0;
             return seasonOf(item) || (results.length <= 1 || results.indexOf(item) === 0 ? 1 : 0);
         }
@@ -2165,6 +2329,7 @@
                     items: sourceMenu([
                         {group: 'Аніме (укр)', title: 'AniTube', subtitle: 'Озвучення й субтитри', selected: source === 'anitube', value: 'anitube'},
                         {group: 'Аніме (укр)', title: 'AnimeOn', subtitle: 'Озвучення', selected: source === 'animeon', value: 'animeon'},
+                        {group: 'Аніме (рос.)', title: 'Kodik', subtitle: 'Каталоги YummyAnime та Jut-su', selected: source === 'kodik', value: 'kodik', ru: true},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'UAFilms', subtitle: 'Ashdi, UAflix, Moon за номером TMDB', selected: source === 'uafilms', value: 'uafilms'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'UAflix', subtitle: 'Аніме, фільми, серіали, дорами', selected: source === 'uafix', value: 'uafix'},
                         {group: 'Фільми, серіали, дорами (укр)', title: 'UA Serials', subtitle: 'Фільми, серіали, дорами, аніме', selected: source === 'uaserials', value: 'uaserials'},
@@ -2264,14 +2429,14 @@
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
-            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama') {
+            if (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'kodik' || source === 'dorama') {
                 var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
                 if (numbers.length > 1) {
                     addRow(numbers.map(function (number) {
                         return chip('Сезон ' + number, '', number === season, function () {
                             if (number === season) return;
                             remember(key, {season: number});
-                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama') self.useSourceSeason(number); else self.useSeason(number);
+                            if (source === 'uafilms') self.useUafilmsSeason(number); else if (source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'kodik' || source === 'dorama') self.useSourceSeason(number); else self.useSeason(number);
                         });
                     }));
                 }
@@ -2309,7 +2474,7 @@
             if (!voice) return;
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title, item.title);
-                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'dorama' ? '#s' + season : '') + ':' + (info.number || info.original));
+                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'kodik' || source === 'dorama' ? '#s' + season : '') + ':' + (info.number || info.original));
                 return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label, timeline: Lampa.Timeline.view(hash)};
             });
             entries = episodeOrder(entries, false).map(function (index) { return entries[index]; });
@@ -2609,6 +2774,28 @@
                     failed: function (xhr) { return 'BambooUA: не вдалося отримати результати пошуку' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
                     nothing: function (m) { return 'BambooUA: ' + where(m) + '. Спробуй назву із сайту через «Пошук» або інше джерело.'; }
                 },
+                kodik: {
+                    label: 'Kodik', verify: true, strict: true,
+                    fetch: function (q, ok, fail) {
+                        var pendingSites = 2, successful = 0, rows = [], lastError = null;
+                        function finish(html, site) {
+                            successful++;
+                            rows = rows.concat(kodikCatalog(site, html));
+                            if (--pendingSites === 0) ok(kodikCombineCatalogs(rows));
+                        }
+                        function failed(xhr) {
+                            lastError = xhr;
+                            if (--pendingSites === 0) {
+                                if (successful) ok(kodikCombineCatalogs(rows)); else fail(lastError);
+                            }
+                        }
+                        ['yummy', 'jutsu'].forEach(function (site) {
+                            kodikRequest('search', {site: site, q: q}, function (html) { finish(html, site); }, failed);
+                        });
+                    },
+                    failed: function (xhr) { return 'Kodik: не вдалося отримати каталоги YummyAnime/Jut-su' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '') + '.'; },
+                    nothing: function (m) { return 'Kodik: ' + where(m) + ' у каталогах YummyAnime та Jut-su. Спробуй інше слово через «Пошук».'; }
+                },
                 dorama: {
                     label: 'DoramaUA', verify: true, strict: true,
                     fetch: function (q, ok, fail) { doramaApi('/search?text=' + encodeURIComponent(q), function (data) { ok(doramaCatalog(data)); }, fail); },
@@ -2698,6 +2885,7 @@
             this.loading(true);
             if (source === 'uafix') return this.openUafix();
             if (source === 'animeon') return this.openAnimeon();
+            if (source === 'kodik') return this.openKodik();
             if (source === 'dorama') return this.openDorama();
             if (source === 'uafilms') return this.openUafilms();
             if (source === 'uaserials') return this.openUaserials();
@@ -2859,6 +3047,37 @@
             });
         };
 
+        // YummyAnime / Jut-su resolve the Kodik iframe through their own controller; the stream stays direct from Kodik's CDN.
+        this.openKodik = function () {
+            var mine = openSeq, pages = item.ref && item.ref.pages || [], index = 0, last = '';
+            function tryNext() {
+                if (closed || mine !== openSeq) return;
+                if (index >= pages.length) {
+                    var android = Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android');
+                    var note = /HTTP 404/.test(last) && !android ? ' (потрібне оновлення Worker)' : '';
+                    return self.empty('Kodik: не вдалося прочитати плеєр' + (last ? ' (' + last + ')' : '') + note + '.');
+                }
+                var candidate = pages[index++];
+                kodikRequest('player', candidate, function (data) {
+                    if (closed || mine !== openSeq) return;
+                    var playerUrl = data && data.status && data.data && data.data.src;
+                    if (!kodikEmbed(playerUrl)) { last = 'на сайті немає посилання Kodik'; return tryNext(); }
+                    kodikRequest('embed', {site: candidate.site, ref: candidate.url, url: playerUrl}, function (html) {
+                        if (closed || mine !== openSeq) return;
+                        var parsed = kodikPageData(html, playerUrl);
+                        if (!Object.keys(parsed.seasons || {}).length) { last = 'Kodik не повернув список серій'; return tryNext(); }
+                        seasons = parsed.seasons;
+                        var numbers = Object.keys(seasons).map(Number).sort(function (a, b) { return a - b; });
+                        var wanted = saved(key).season;
+                        var selected = numbers.indexOf(wanted) >= 0 ? wanted : (numbers.indexOf(parsed.selected) >= 0 ? parsed.selected : numbers[0]);
+                        self.useSourceSeason(selected, true);
+                    }, function (xhr) { last = xhr && xhr.status ? 'HTTP ' + xhr.status : 'немає відповіді Kodik'; tryNext(); });
+                }, function (xhr) { last = xhr && xhr.status ? 'HTTP ' + xhr.status : 'немає відповіді сайту'; tryNext(); });
+            }
+            if (!pages.length) return self.empty('Kodik: у результаті пошуку немає сторінки джерела.');
+            tryNext();
+        };
+
         this.openUaserials = function () {
             var mine = openSeq;
             uaserialGet('page', item.url, function (html) {
@@ -2988,10 +3207,25 @@
             }, failure);
         }
 
+        function kodikStream(entry, success, failure) {
+            var ref = entry && entry.ref;
+            if (!ref || ref.kind !== 'seria' || !/^\d{1,12}$/.test(String(ref.id || '')) || !/^[a-f\d]{16,64}$/i.test(String(ref.hash || '')) || !kodikEmbed(ref.embedUrl)) {
+                return failure('у серії немає даних Kodik');
+            }
+            var form = Object.assign({}, ref.params || {}, {bad_user: false, cdn_is_working: true, type: ref.kind, id: ref.id, hash: ref.hash, isUpdate: true});
+            kodikRequest('ftor', {embedUrl: ref.embedUrl, form: form}, function (data) {
+                var stream = kodikStreamUrl(data);
+                if (!stream) return failure('Kodik не повернув відкритий HLS-потік 720p або нижче');
+                entry.quality = stream.quality || entry.quality || 0;
+                success(entry.stream = stream.url);
+            }, function (xhr) { failure('Kodik не повернув потік' + (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '')); });
+        }
+
         // 3. episode list with watch progress; the whole list becomes the player's playlist
         function resolveEntry(entry, success, failure) {
             if (entry.supported === false) return failure('плеєр ' + entry.player + ' поки не підтримується');
             if (entry.stream && (!moonPage(entry.url) || moonStreamFresh(entry))) return success(entry.stream);
+            if (source === 'kodik') return kodikStream(entry, success, failure);
             if (source === 'uafilms' && entry.ref && entry.ref.variant) return uafilmsStream(entry, success, failure);
             if (source === 'uafix') return uafixStream(entry.url, entry.kind, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
             if (source === 'dorama') return doramaStream(entry.ref, function (stream, subtitles) { entry.subtitles = subtitles; success(entry.stream = stream); }, failure);
@@ -3007,7 +3241,7 @@
             if (entry.resolving) { entry.resolving.push([success, failure]); return; }
             entry.resolving = [[success, failure]];
             var done = false;
-            var limit = source === 'uafilms' ? 45 : 20;
+            var limit = source === 'uafilms' ? 45 : source === 'kodik' ? 30 : 20;
             var timer = setTimeout(function () { finish('', 'джерело не відповіло за ' + limit + ' секунд'); }, limit * 1000);
             function finish(url, why) {
                 if (done) return;

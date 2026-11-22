@@ -2,13 +2,13 @@
 
 A Lampa plugin that adds an **AniTube** action with an SVG play icon to a card. It opens a series page (voice, season and episode chips, like the UAKino plugin's) with Ukrainian voice-overs and subtitles, and plays the episode in Lampa's player with a playlist, so next/previous episode work.
 
-Current channels (8 November 2026):
+Current channels (22 November 2026):
 
 - Working **2.0.9**: `https://dez955.github.io/a.js`, pinned to the unchanged `old/anitube-2.0.9.js`.
-- Test beta **2.0.11** with source visibility and faster saved-title opening: `https://dez955.github.io/anionline/anitube-beta.js?v=2.0.11`.
+- Test beta **2.0.22** with the Kodik source from YummyAnime and Jut-su: `https://dez955.github.io/anionline/anitube-beta.js?v=2.0.22`.
 - Legacy `anitube.js`: **1.8.19**, unchanged.
 
-Use one AniTube address at a time. DoramaUA on TVs requires the updated Cloudflare Worker; see [BETA.md](BETA.md).
+Use one plugin address at a time. For Kodik on Samsung/LG, deploy the updated Cloudflare Worker; see [BETA.md](BETA.md).
 
 Before the 1.8.3 changes on 2 November 2026, the local `anitube.js` and the published main and beta files were downloaded and verified byte-for-byte identical (SHA-256: `da74b5160d65caf4b0a0584e4d966ee831e6336df389a259263757f0b85d285d`). The local source is `anitube.js`; `anitube-beta.js` is the beta publication filename, not a separate local source. New changes go to beta first; publishing to main requires the owner’s instruction.
 
@@ -22,7 +22,7 @@ Restart Lampa or refresh its plugins after an update (Lampa caches plugins; addi
 
 ## Sources
 
-The **Джерело** chip on the page switches between them. While no source has been chosen for a card and a search finds nothing, the next one is tried on its own (AniTube → Makhno → AnimeOn → UAflix → DoramaUA → AniLibria); a source you pick is remembered for that card.
+The **Джерело** chip on the page switches between them. While no source has been chosen for a card and a search finds nothing, the next one is tried on its own; a source you pick is remembered for that card.
 
 - **AniTube** (anitube.in.ua): search and playlists; only the Ashdi player is used, because it gives a direct HLS address.
 - **Makhno**: Ashdi's own catalogue, found by the card's TMDB number (the public server of the "Bandera Online" Lampa plugin only says which Ashdi page belongs to the number). The Ashdi page lists every voice with its seasons and episodes, which the plugin reads itself; it also gives separate subtitle files. Films work too.
@@ -30,6 +30,7 @@ The **Джерело** chip on the page switches between them. While no source h
 - **UAflix** (uafix.net): series and films. The site shows its player only to Ukrainian addresses, so it works on an Android box (the request goes from your own network) but not through the cloud helper servers used for Smart TVs. Version 1.8.2 also supports a relay on the owner’s home Android box; the Samsung-to-box path still needs TV verification.
 - **DoramaUA** (doramaua.tv): dramas from its catalogue API and player pages. Available on Android or when a home box address is configured. Ukrainian voice-over comes first, then Ukrainian subtitles; Russian voices are hidden unless the Russian switch is enabled. Player pages are requested directly on Android or through the home box.
 - **AniLibria** (anilibria.top): anime with a **Russian** voice-over, from the site's own public API. Its 1080p averages about 3.2 Mbit/s, higher than the Ukrainian sources. It is tried last, and only when **Показувати російські джерела** is enabled.
+- **Kodik (YummyAnime / Jut-su)**: anime search and episode lists from both catalogues, with duplicate results combined. Kodik playback is available only when **Показувати російські джерела** is enabled. Quality depends on the episode; the plugin selects the highest available up to 1080p.
 
 Subtitles that come as a separate file on the player page are passed to Lampa's player, so they can be chosen there. Subtitles burned into the picture cannot be switched off. The player header uses the selected source title, except for AniLibria, where the card’s translated display name is preferred; if the card has no translation, the Ukrainian or English name from TMDB is also used to search.
 
