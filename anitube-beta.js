@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.19';
+    var VERSION = '2.0.20';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -2144,7 +2144,7 @@
             var head = $('<div class="atp__head"><div class="atp__title"></div><div class="atp__meta"></div></div>');
             head.find('.atp__title').text(item ? item.title : (movie.title || movie.name || 'ДубльUA'));
             var meta = [];
-            if (voice) meta.push(voice.episodes.length + ' ' + plural(voice.episodes.length, 'серія', 'серії', 'серій'));
+            if (voice && (isTv || voice.episodes.length > 1)) meta.push(voice.episodes.length + ' ' + plural(voice.episodes.length, 'серія', 'серії', 'серій'));
             if (results.length > 1) meta.push(results.length + ' ' + plural(results.length, 'варіант', 'варіанти', 'варіантів') + ' на ' + SOURCE_NAMES[source]);
             // For tracing "the page shows one anime and the player plays another": the id of the opened release/title is printed on the page.
             if (item && item.ref && item.ref.id) meta.push('№ ' + item.ref.id);
@@ -2152,45 +2152,10 @@
             body.append(head);
             body.append($('<div class="atp-playback-status"></div>').text(playbackMessage));
 
-            var first = [];
+            var first = [], voiceColumn = 0, playerColumn = 0;
             // Releases of the same show are its seasons; everything else that was found is another candidate, kept out of the chip rows.
             var related = item ? results.filter(function (r) { return r === item || (isTv && sameFranchise(r, item)); }) : [];
             var others = item ? results.filter(function (r) { return related.indexOf(r) < 0; }) : [];
-            if (voice) {
-                first.push(chip('Озвучення', voice.label, false, function () {
-                    if (voices.length < 2) return Lampa.Noty.show('Для цього тайтлу лише один варіант озвучення');
-                    Lampa.Select.show({
-                        title: 'Озвучення / субтитри',
-                        items: voices.filter(function (v, index) { return voices.findIndex(function (x) { return x.label === v.label; }) === index; }).map(function (v) {
-                            var opens = voiceFor(v.label);
-                            return {title: v.label, subtitle: 'Серій: ' + voices[opens].episodes.length + voiceSubtitleNote(voices[opens]), selected: v.label === voice.label, index: opens};
-                        }),
-                        onBack: function () { Lampa.Controller.toggle('content'); },
-                        onSelect: function (picked) {
-                            playbackMessage = '';
-                            voiceIndex = picked.index;
-                            remember(key, {voice: voices[voiceIndex].label, player: saved(key).player || ''});
-                            Lampa.Controller.toggle('content');
-                            self.draw();
-                            focusAt(0, 0);
-                        }
-                    });
-                }, voices.length > 1));
-            }
-            if (voice && voice.player) {
-                first.push(chip('Плеєр', voice.player, false, function () {
-                    Lampa.Select.show({title: 'Плеєр · ' + voice.label,
-                        items: voices.map(function (v, index) { return {title: v.player, subtitle: (v.supported === false ? 'Не підтримується · ' : '') + 'Серій: ' + v.episodes.length, selected: index === voiceIndex, index: index, label: v.label}; }).filter(function (v) { return v.label === voice.label; }),
-                        onBack: function () { Lampa.Controller.toggle('content'); },
-                        onSelect: function (picked) {
-                            playbackMessage = '';
-                            voiceIndex = picked.index;
-                            remember(key, {voice: voices[voiceIndex].label, player: voices[voiceIndex].player});
-                            Lampa.Controller.toggle('content'); self.draw(); focusAt(0, 1);
-                        }
-                    });
-                }, true));
-            }
             first.push(chip('Джерело', SOURCE_NAMES[source], false, function () {
                 Lampa.Select.show({
                     title: 'Джерело серій',
@@ -2213,6 +2178,47 @@
                     }
                 });
             }, true));
+            var labels = voices.filter(function (v, index) { return voices.findIndex(function (x) { return x.label === v.label; }) === index; });
+            var variants = voice ? voices.filter(function (v) { return v.label === voice.label; }) : [];
+            // A film with one dub and one player shows neither chip: there is nothing to choose (the card below names them).
+            var plainFilm = !isTv && voice && voice.episodes.length === 1;
+            if (voice && (labels.length > 1 || !plainFilm)) {
+                voiceColumn = first.length;
+                first.push(chip('Озвучення', voice.label, false, function () {
+                    if (labels.length < 2) return Lampa.Noty.show('Для цього тайтлу лише один варіант озвучення');
+                                        Lampa.Select.show({
+                        title: 'Озвучення / субтитри',
+                        items: voices.filter(function (v, index) { return voices.findIndex(function (x) { return x.label === v.label; }) === index; }).map(function (v) {
+                            var opens = voiceFor(v.label);
+                            return {title: v.label, subtitle: 'Серій: ' + voices[opens].episodes.length + voiceSubtitleNote(voices[opens]), selected: v.label === voice.label, index: opens};
+                        }),
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (picked) {
+                            playbackMessage = '';
+                            voiceIndex = picked.index;
+                            remember(key, {voice: voices[voiceIndex].label, player: saved(key).player || ''});
+                            Lampa.Controller.toggle('content');
+                            self.draw();
+                            focusAt(0, voiceColumn);
+                        }
+                    });
+                }, true));
+            }
+            if (voice && voice.player && (variants.length > 1 || !plainFilm)) {
+                playerColumn = first.length;
+                first.push(chip('Плеєр', voice.player, false, function () {
+                    Lampa.Select.show({title: 'Плеєр · ' + voice.label,
+                        items: voices.map(function (v, index) { return {title: v.player, subtitle: (v.supported === false ? 'Не підтримується · ' : '') + 'Серій: ' + v.episodes.length, selected: index === voiceIndex, index: index, label: v.label}; }).filter(function (v) { return v.label === voice.label; }),
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (picked) {
+                            playbackMessage = '';
+                            voiceIndex = picked.index;
+                            remember(key, {voice: voices[voiceIndex].label, player: voices[voiceIndex].player});
+                            Lampa.Controller.toggle('content'); self.draw(); focusAt(0, playerColumn);
+                        }
+                    });
+                }, true));
+            }
             if (others.length) {
                 first.push(chip('Інші варіанти', others.length, false, function () {
                     Lampa.Select.show({
@@ -2339,7 +2345,7 @@
                     entry.title = name;
                     function showQuality(height) { node.find('.atp-ep__name').text(name + (height ? ' · ' + height + 'p' : '')); }
                     showQuality(entry.quality);
-                    node.find('.atp-ep__meta').text([voice.label, voice.player, voice.supported === false ? 'Плеєр не підтримується' : ''].filter(Boolean).join(' · '));
+                    node.find('.atp-ep__meta').text([voice.label, voice.player && voice.label.indexOf(voice.player) < 0 ? voice.player : '', voice.supported === false ? 'Плеєр не підтримується' : ''].filter(Boolean).join(' · '));
                     node.find('.atp-ep__date').text([date, runtime].filter(Boolean).join(' · '));
                     node[0].atEntry = entry; node[0].atQuality = showQuality;
                     if (displayIndex < 8 && media(entry.url)) self.inspectQuality(entry, showQuality, current);
@@ -3853,8 +3859,8 @@
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
-                param: {name: 'anitube_box', type: 'input', values: '', 'default': '', placeholder: '192.168.0.15:8787'},
-                field: {name: 'Адреса приставки', description: 'Android-приставка вдома з ретранслятором (home-proxy/box-relay.mjs). Потрібна на Smart TV лише як запасний шлях для UAflix (основний — власний акаунт UAflix у налаштуваннях). Адреса змінюється, коли приставку переносять в іншу мережу.'}
+                param: {name: 'anitube_box', type: 'input', values: '', 'default': '', placeholder: 'не вказано'},
+                field: {name: 'Адреса приставки', description: 'Порожньо = приставка не використовується. Android-приставка вдома з ретранслятором (home-proxy/box-relay.mjs). Потрібна на Smart TV лише як запасний шлях для UAflix (основний — власний акаунт UAflix у налаштуваннях). Адреса змінюється, коли приставку переносять в іншу мережу.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
