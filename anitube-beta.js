@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.25';
+    var VERSION = '2.0.26';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 7000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -348,8 +348,7 @@
         Lampa.Storage.set('video_quality_default', '1080', true);
     }
     function autoQualityEnabled() {
-        var value = Lampa.Storage.field('anitube_auto_quality');
-        return value === true || value === 'true';
+        return false;
     }
     // Moon starts at its highest quality. With the setting on, repeated or long stalls lower it one step.
     function watchMoonQuality() {
@@ -468,13 +467,15 @@
         return typed;
     }
     function homeKey() { return customProxy() ? storedProxyKey() : ''; }
-    function clearLegacyWorkerKey() {
-        var box = '';
-        try { box = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_box')) || '').trim(); } catch (e) {}
-        // The old built-in Worker key is no longer needed. Preserve the setting only for a custom proxy or home box.
-        if (!customProxy() && !box) {
-            try { if (window.Lampa && Lampa.Storage) Lampa.Storage.set('anitube_proxy_key', '', true); } catch (e) {}
-        }
+    function clearRemovedSettings() {
+        try {
+            if (!window.Lampa || !Lampa.Storage) return;
+            Lampa.Storage.set('anitube_proxy', '', true);
+            Lampa.Storage.set('anitube_proxy_key', '', true);
+            Lampa.Storage.set('anitube_box', '', true);
+            Lampa.Storage.set('anitube_auto_quality', false, true);
+            Lampa.Storage.set('anitube_follow_mode', 'any', true);
+        } catch (e) {}
     }
     function homeUrl(home, action, name, value) {
         var key = homeKey();
@@ -522,13 +523,7 @@
     var BOX_PORT = 8787;
     var boxNote = '';
     function boxAddress() {
-        var value = '';
-        try { value = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_box')) || '').trim().replace(/\/+$/, ''); } catch (e) {}
-        if (!value) return '';
-        if (!/^https?:\/\//i.test(value)) value = 'http://' + value;
-        if (!/^https?:\/\/[^\/\s?#]+$/i.test(value)) return '';
-        if (!/:\d+$/.test(value.replace(/^https?:\/\//i, ''))) value += ':' + BOX_PORT;
-        return value;
+        return '';
     }
     function boxRequest(path, params, dataType, success, failure) {
         var base = boxAddress();
@@ -3512,8 +3507,7 @@
     function followSave(all) { Lampa.Storage.set(FOLLOW_STORE, all, true); }
     function followGet(id) { return id ? followAll()[String(id)] || null : null; }
     function followMode() {
-        var mode = Lampa.Storage.get('anitube_follow_mode', 'any');
-        return FOLLOW_MODES[mode] ? mode : 'any';
+        return 'any';
     }
     // Enough of the TMDB card to open the screen again later: plain values only, long texts cut.
     function followCard(movie) {
@@ -4128,17 +4122,33 @@
             'body.true--mobile .atp-ep__img{flex-basis:8em;height:4.8em}body.true--mobile .atp-ep__descr{display:none}' +
             '</style>');
     }
+    function versionNotes() {
+        var back = Lampa.Controller.enabled().name;
+        Lampa.Select.show({
+            title: 'ДубльUA · версія ' + VERSION,
+            items: [
+                {title: 'ДОДАНО', separator: true},
+                {title: 'Автопідбір джерела за типом картки', subtitle: 'Окремий порядок для аніме, фільмів, серіалів і дорам.'},
+                {title: 'Автоматичний перехід між джерелами', subtitle: 'До 7 секунд на джерело; приховані джерела пропускаються.'},
+                {title: 'ПРИБРАНО', separator: true},
+                {title: 'Автозниження якості Moon', subtitle: 'Функцію вимкнено; налаштування більше немає.'},
+                {title: 'Загальний режим нових зірочок', subtitle: 'Прибрано налаштування за замовчуванням.'},
+                {title: 'Налаштування приставки й власного проксі', subtitle: 'Прибрано адресу, перевірку приставки й поле ключа.'},
+                {title: 'ЗМІНЕНО', separator: true},
+                {title: 'Нові зірочки стежать за будь-яким типом серій', subtitle: 'Режим для кожного аніме можна змінити окремо.'},
+                {title: 'Порядок налаштувань', subtitle: '«Показати / сховати джерела» переміщено вниз; старі адреси очищено.'},
+                {title: 'Вікно версії', subtitle: 'Натисни «Версія», щоб відкрити цей список змін.'},
+                {title: 'У ПРОЦЕСІ', separator: true},
+                {title: 'Перевірка на телевізорі', subtitle: 'Очікує тесту бети 2.0.26 на Samsung / LG.'}
+            ],
+            onBack: function () { Lampa.Controller.toggle(back); }
+        });
+    }
     // Settings → AniTube: address of the home-network helper, only needed on TVs that cannot reach AniTube themselves.
     function addSettings() {
         try {
             if (!Lampa.SettingsApi || Lampa.SettingsApi.getComponent && Lampa.SettingsApi.getComponent('anitube')) return;
             Lampa.SettingsApi.addComponent({component: 'anitube', icon: ICON, name: 'ДубльUA'});
-            Lampa.SettingsApi.addParam({
-                component: 'anitube',
-                param: {name: 'anitube_sources', type: 'button'},
-                field: {name: 'Показати / сховати джерела', description: 'Вибери джерела для меню й автоматичного пошуку. Збережені вибори не видаляються.'},
-                onChange: sourceSettings
-            });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_auto_source', type: 'trigger', 'default': true},
@@ -4147,23 +4157,13 @@
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_version', type: 'button'},
-                field: {name: 'Версія ' + VERSION, description: 'Фактично завантажена версія ДубльUA.'},
-                onChange: function () { Lampa.Noty.show('ДубльUA v' + VERSION); }
+                field: {name: 'Версія ' + VERSION, description: 'Відкрити список змін цієї версії.'},
+                onChange: versionNotes
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_russian', type: 'trigger', 'default': false},
                 field: {name: 'Показувати російські джерела', description: 'Вимкнено: лише українські джерела. Увімкнено: додається AniLibria та російські озвучення DoramaUA.'}
-            });
-            Lampa.SettingsApi.addParam({
-                component: 'anitube',
-                param: {name: 'anitube_auto_quality', type: 'trigger', 'default': false},
-                field: {name: 'Знижувати якість Moon при поганому зв\'язку', description: 'Типово вимкнено: завжди максимальна якість. Увімкнено: якщо відео зависає, якість падає на один крок. Лише для Moon на ТВ.'}
-            });
-            Lampa.SettingsApi.addParam({
-                component: 'anitube',
-                param: {name: 'anitube_follow_mode', type: 'select', values: FOLLOW_MODES, 'default': 'any'},
-                field: {name: 'Стеження: типово для нових зірочок', description: 'Що чекати від аніме, яке ти щойно додав зірочкою: будь-що, лише субтитри чи лише озвучення. Для кожного аніме окремо: «Мої стеження» → довге ОК на тайтлі → «Що чекати».'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
@@ -4192,17 +4192,6 @@
                     Lampa.Noty.show('ДубльUA: збережені вибори скинуто');
                 }
             });
-            Lampa.SettingsApi.addParam({
-                component: 'anitube',
-                param: {name: 'anitube_box', type: 'input', values: '', 'default': '', placeholder: 'не вказано'},
-                field: {name: 'Адреса приставки', description: 'Порожньо = приставка не використовується. Android-приставка вдома з ретранслятором (home-proxy/box-relay.mjs). Потрібна на Smart TV лише як запасний шлях для UAflix (основний — власний акаунт UAflix у налаштуваннях). Адреса змінюється, коли приставку переносять в іншу мережу.'}
-            });
-            Lampa.SettingsApi.addParam({
-                component: 'anitube',
-                param: {name: 'anitube_box_check', type: 'button'},
-                field: {name: 'Перевірити приставку', description: 'Показує, чи приставка відповідає і до яких сайтів вона дістається.'},
-                onChange: function () { boxCheck(); }
-            });
             Lampa.SettingsApi.addParam({component: 'anitube', param: {name: 'anitube_uafix_title', type: 'title'}, field: {name: 'UAflix — акаунт'}});
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
@@ -4229,13 +4218,9 @@
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
-                param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
-                field: {name: 'Адреса проксі', description: 'Адреса Worker уже вказана в плагіні. Змінюй її лише для власного проксі; ключ вводиться нижче.'}
-            });
-            Lampa.SettingsApi.addParam({
-                component: 'anitube',
-                param: {name: 'anitube_proxy_key', type: 'input', values: '', 'default': '', placeholder: 'ключ доступу'},
-                field: {name: 'Ключ власного проксі / приставки', description: 'Для вбудованого Worker ключ не потрібен. Заповнюй лише для власного проксі або захищеної приставки.'}
+                param: {name: 'anitube_sources', type: 'button'},
+                field: {name: 'Показати / сховати джерела', description: 'Вибери джерела для меню й автоматичного пошуку. Збережені вибори не видаляються.'},
+                onChange: sourceSettings
             });
         } catch (e) {}
     }
@@ -4274,8 +4259,8 @@
     function start() {
         if (window.plugin_anitube_prototype_ready) return;
         window.plugin_anitube_prototype_ready = true;
+        clearRemovedSettings();
         restoreMoonPlayer();
-        clearLegacyWorkerKey();
         addTemplates();
         addSettings();
         followStart();
