@@ -5,8 +5,8 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.22';
-    var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000;
+    var VERSION = '2.0.23';
+    var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 8000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
     var ANIMEON_AHEAD = 6, ANIMEON_BEHIND = 1;
@@ -455,18 +455,18 @@
     // Address of the optional home-network helper (home-proxy/server.mjs) for TVs that cannot reach AniTube themselves.
     // The owner's own Cloudflare Worker, built in so nothing has to be typed on a TV. Anything entered in Settings -> AniTube wins.
     var DEFAULT_PROXY = 'https://anitube-proxy.dezmand39.workers.dev';
-    var DEFAULT_KEY = '99380bc4907c37c189420da5965f614d';
+    var DEFAULT_KEY = '';
     function customProxy() {
         var value = '';
         try { value = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_proxy')) || '').trim().replace(/\/+$/, ''); } catch (e) {}
         return /^https?:\/\/\S+$/i.test(value) ? value : '';
     }
     function homeProxy() { return customProxy() || DEFAULT_PROXY; }
-    // Secret for a helper that is reachable from the internet; sent as ?key=. A custom address uses the key typed with it.
+    // Secret for a helper that is reachable from the internet; it is typed in Lampa and never shipped in this public file.
     function homeKey() {
         var typed = '';
         try { typed = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_proxy_key')) || '').trim(); } catch (e) {}
-        return customProxy() ? typed : (typed || DEFAULT_KEY);
+        return typed;
     }
     function homeUrl(home, action, name, value) {
         var key = homeKey();
@@ -525,8 +525,11 @@
     function boxRequest(path, params, dataType, success, failure) {
         var base = boxAddress();
         if (!base) return failure(null);
+        var key = homeKey();
         var query = Object.keys(params).filter(function (name) { return params[name] !== '' && params[name] != null; })
-            .map(function (name) { return name + '=' + encodeURIComponent(params[name]); }).concat('key=' + encodeURIComponent(DEFAULT_KEY)).join('&');
+            .map(function (name) { return name + '=' + encodeURIComponent(params[name]); });
+        if (key) query.push('key=' + encodeURIComponent(key));
+        query = query.join('&');
         $.ajax({url: base + '/' + path + '?' + query, dataType: dataType, timeout: 25000, cache: false, success: success, error: failure});
     }
     // Text that a server sent as UTF-8 but that was read as Windows-1252/Latin-1 ("Ð½Ðµ" instead of "не"). This happens when a helper's own source
@@ -2104,6 +2107,7 @@
         var movie = object.movie || {};
         var html, scroll, body, rows = [], cur = {r: 0, c: 0};
         var results = [], item = null, voices = [], voiceIndex = 0, entries = [], closed = false, manual = '', tmdbCache = {}, token = 0;
+        var titleLookupsPending = false, searchRequestId = 0;
         var isTv = !!(movie.name || movie.number_of_seasons || movie.first_air_date);
         // The star on the card asked for this title to be followed as soon as its AniTube page is opened; used once.
         var pendingFollow = !!object.follow;
@@ -2279,16 +2283,30 @@
                 self.openTitle(selected);
                 return this.render();
             }
-            // Other names of the card from two places at once (TMDB translations, AniList for a Japanese-only card), then the search starts.
-            var gathered = [], waiting = 2;
+            // Make the source picker usable while the first catalogue request is still in flight.
+            self.draw('Шукаю на ' + (SOURCE_NAMES[source] || 'джерелі') + '…');
+            self.loading(false);
+            self.start(true);
+            // Fetch additional names in the background while the card's own title is searched.
+            var gathered = [], waiting = 2, initialSearchStarted = false;
+            titleLookupsPending = true;
             function got(index, list) {
                 gathered[index] = list || [];
                 if (--waiting > 0 || closed) return;
                 extraTerms = unique((gathered[0] || []).concat(gathered[1] || []));
-                self.search(0);
+                titleLookupsPending = false;
+                // The card title is searched immediately. Only repeat with TMDB/AniList aliases if that quick search found nothing.
+                if (!results.length && !item && !manual && source === 'anitube') {
+                    initialSearchStarted = true;
+                    self.search(0);
+                }
             }
             tmdbTitles(movie, function (list) { got(0, list); });
             anilistTitles(movie, function (list) { got(1, list); });
+            if (!initialSearchStarted) {
+                initialSearchStarted = true;
+                self.search(0);
+            }
             return this.render();
         };
 
@@ -2637,6 +2655,7 @@
         this.useName = function (value) {
             // An empty value clears the chosen name, so the search goes back to the card's own names.
             if (!value && !manual) return;
+            openSeq++;
             if (!value) Lampa.Noty.show('Ручну назву скинуто, шукаю за назвами картки');
             // AniTube often names a show differently from the card, so the title can be chosen or typed (and is remembered).
             manual = value;
@@ -2652,7 +2671,8 @@
         // Every source is searched with the card's names in all languages at once; the results are merged and ranked by how closely their
         // own names match the card's, and a clear winner is opened by itself. `spec`: label, fetch(query, ok, fail), strict (drop results
         // that do not resemble the card), words (also ask distinctive words), failed(xhr, why), nothing.
-        this.searchMany = function (spec) {
+        this.searchMany = function (spec, requestId) {
+            function current() { return !closed && requestId === searchRequestId; }
             var tiers = manual ? [[manual]] : nameTiers(movie, extraTerms);
             var flat = tiers.reduce(function (all, tier) { return all.concat(tier); }, []);
             var names = [];
@@ -2663,9 +2683,11 @@
             // two of them ("Самый сильный в мире заступник: Страна лабиринта…" matched "На самом деле я самый сильный?").
             var cards = manual ? [] : fullNames(movie, extraTerms).map(nameWords).filter(function (c) { return c.length; });
             var year = parseInt(String(movie.release_date || movie.first_air_date || '').slice(0, 4), 10) || 0;
-            var pending = names.length, seen = {}, list = [], failures = 0, lastFailure = [];
+            var pending = names.length, seen = {}, list = [], failures = 0, lastFailure = [], completed = false, settleTimer;
             function finish() {
-                if (closed) return;
+                if (completed || !current()) return;
+                completed = true;
+                clearTimeout(settleTimer);
                 // Some sites list every name of a show in one title ("Доктор X / Доктор Ікс / ... / Doctor X: ..."). Each name is scored on its own, and the
                 // screen shows only the one that looks most like the card's title, so the heading stays readable.
                 var shown = displayName();
@@ -2707,15 +2729,27 @@
                     var unsure = !!spec.verify && !manual && top <= 0;
                     return self.found(scored.map(function (e) { return e.r; }), flat, (spec.strict && !auto) || unsure, auto && scored.length > 1 ? scored[0].r : null);
                 }
+                // Let the fast card-title search finish before falling back; its TMDB/AniList names arrive separately.
+                if (source === 'anitube' && !manual && titleLookupsPending) return;
                 if (self.nextSource()) return self.search(0);
                 if (failures === names.length) return self.empty(spec.failed(lastFailure[0], lastFailure[1]));
                 self.empty(spec.nothing(manual, list.length));
             }
+            // A missing or very slow alternate-name response must not keep the source screen on its loader indefinitely.
+            settleTimer = setTimeout(finish, SEARCH_BUDGET);
             names.forEach(function (query) {
                 spec.fetch(query, function (items) {
+                    if (completed || !current()) return;
                     (items || []).forEach(function (r) { if (!seen[r.url]) { seen[r.url] = true; list.push(r); } });
+                    // A unique exact title is enough to show the result. Do not keep the user waiting for slower alternate-name requests.
+                    var exact = (items || []).filter(function (r) {
+                        var aliases = [r.title].concat(r.names || []).concat(String(r.title || '').split(/\s+\/\s+/));
+                        return aliases.some(function (name) { return normalize(name) === normalize(query); });
+                    });
+                    if (exact.length === 1) return finish();
                     if (--pending === 0) finish();
                 }, function (xhr, why) {
+                    if (completed || !current()) return;
                     failures++;
                     lastFailure = [xhr, why];
                     if (--pending === 0) finish();
@@ -2724,6 +2758,7 @@
         };
 
         this.search = function () {
+            var requestId = ++searchRequestId;
             var queries = manual ? [manual] : nameTiers(movie, extraTerms).reduce(function (all, tier) { return all.concat(tier); }, []);
             lastQueries = queries;
             var where = function (m) { return (m ? 'за запитом «' + m + '»' : 'за назвою цієї картки') + ' нічого не знайдено'; };
@@ -2813,7 +2848,7 @@
                 }
             };
             if (source === 'uafilms') return this.searchUafilms(queries);
-            this.searchMany(specs[source]);
+            this.searchMany(specs[source], requestId);
         };
 
         // When nothing is found and the source was not chosen by hand, the next one in ORDER is searched.
@@ -2829,6 +2864,7 @@
         // Picking another source starts the search again from the card's own names.
         this.switchSource = function (name) {
             if (!sourceAllowed(name)) return;
+            openSeq++;
             playSeq++; launching = false;
             source = name;
             fellBack = true;
@@ -4132,12 +4168,12 @@
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_proxy', type: 'input', values: '', 'default': '', placeholder: 'http://192.168.0.10:8787'},
-                field: {name: 'Адреса проксі', description: 'Не потрібна: у плагін уже вшито робочу адресу. Заповнюй лише щоб підставити власний проксі.'}
+                field: {name: 'Адреса проксі', description: 'Адреса Worker уже вказана в плагіні. Змінюй її лише для власного проксі; ключ вводиться нижче.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_proxy_key', type: 'input', values: '', 'default': '', placeholder: 'ключ доступу'},
-                field: {name: 'Ключ проксі', description: 'Потрібен лише разом із власною адресою проксі (ACCESS_KEY).'}
+                field: {name: 'Ключ проксі', description: 'Введи ACCESS_KEY свого Worker або ретранслятора. Значення зберігається лише в Lampa.'}
             });
         } catch (e) {}
     }
