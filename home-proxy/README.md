@@ -1,4 +1,30 @@
-# Home proxy for TVs that cannot reach AniTube themselves
+# Network helpers for AniTube / ДубльUA
+
+Current deployment (updated 23 November 2026):
+
+- Android Lampa requests provider pages natively from its own connection.
+- Samsung/webOS uses `cloudflare-worker.js` for AniTube; Ashdi pages are relayed through the owner’s Koyeb bot using `EMBED_URL`.
+- The built-in Worker's fixed catalogue/player routes are public; Lampa does not send a key. Its secret `ACCESS_KEY` is used only for Worker → Koyeb relay calls and must match the Koyeb service's `ANITUBE_ACCESS_KEY`.
+- `box-relay.mjs` on the owner’s TiVo/Termux handles UAflix and DoramaUA pages from the home connection. It is a separate helper, version **1.1.0**, compatible with plugin **1.8.2**.
+- Video streams directly from the hosting service to the player; helpers do not relay the video.
+
+## Home box used by 1.8.2
+
+The existing TiVo setup has `~/anitube/box-relay.mjs`, `~/anitube/box.key` and `~/anitube/start.sh`. Start it in Termux with `bash ~/anitube/start.sh` when needed; it listens on port 8787. There is currently no automatic restart after reboot; [AUTOSTART.md](AUTOSTART.md) and `termux-boot.sh` (Termux:Boot) provide one; on the real box (9 Nov 2026) the relay answered by itself about 100 s after a reboot. Relay **1.2.0** also accepts Tailscale addresses (100.64.0.0/10).
+
+In Lampa → Settings → AniTube, set **Адреса приставки** to `<box-ip>:8787` and press **Перевірити приставку**. Both devices must be on the same home network. Do not assume the recorded IP is still current.
+
+Routes: `/health`, `/check`, `/uf/search`, `/uf/page`, `/uf/episode`, `/uf/embed`, `/dorama/player`. The home box is separate from the public Cloudflare Worker; its own relay key remains configured locally. Do not paste keys into documentation.
+
+The relay serves private-network clients, limits permitted destinations and does not retain fetched pages. Upstream failures are returned as HTTP 424 with a Ukrainian error and a short code. Cloud relays previously failed to retrieve UAflix episode players and DoramaUA player pages; the plugin uses the box for those paths.
+
+Samsung access to an HTTP box address from HTTPS Lampa still requires TV verification. The source menu shows DoramaUA only on Android or when a valid box address is configured; this is not a connectivity test.
+
+## Older generic proxy instructions
+
+The remaining instructions describe `server.mjs` and alternative deployments, not the active TiVo relay. They are retained for reference. Do not start a local server, enable a background service or deploy a replacement implicitly. Historical statements below about cloud access do not establish current availability.
+
+### Generic server proxy
 
 Lampa on **Android** reads AniTube directly with its native requests, so Android TV boxes need nothing from this folder.
 Lampa on **Samsung Tizen** or **LG webOS** runs inside a browser engine: AniTube and Ashdi send no CORS permission, so the TV
@@ -50,19 +76,14 @@ has to accept that server's address (many cloud hosts are refused with HTTP 403,
 
 With `ACCESS_KEY` set every request except `/health` must carry `?key=<secret>`; without it only private-network clients are served.
 
-## On Cloudflare Workers (free)
+## Existing Cloudflare Worker
 
-[`cloudflare-worker.js`](cloudflare-worker.js) is the same helper as a Cloudflare Worker, for a free account and no server to keep.
-AniTube refuses requests from Netlify and Koyeb (HTTP 403); whether it accepts Cloudflare's network is only known by trying.
+Update the existing Worker `anitube-proxy` by replacing its code with [`cloudflare-worker.js`](cloudflare-worker.js) and deploying it. Keep the current `ACCESS_KEY`, `EMBED_URL`, and KV binding `SYNC` unchanged during this code update. The fixed routes are public; do not enter `ACCESS_KEY` in Lampa. The Worker uses `ACCESS_KEY` only when relaying Ashdi/UAflix requests to Koyeb, where it must match `ANITUBE_ACCESS_KEY`.
 
-1. Cloudflare dashboard → **Workers & Pages** → **Create** → **Create Worker** → name it (e.g. `anitube-proxy`) → **Deploy** → **Edit code**.
-2. Replace the sample code with the whole of `cloudflare-worker.js` and **Deploy**.
-3. Worker → **Settings** → **Variables and Secrets** → **Add** → Type **Secret**, name `ACCESS_KEY`, value = a long random text (16+ characters) → **Deploy**.
-4. Test in a browser: `https://<name>.<account>.workers.dev/search?q=naruto&key=<secret>` should show an HTML page. `{"error": "HTTP 403"}` means AniTube refuses Cloudflare too.
-5. In Lampa: Settings → AniTube → *Адреса проксі* = `https://<name>.<account>.workers.dev`, *Ключ проксі* = the secret.
+**Ashdi / UAflix relay.** If `EMBED_URL` points to the Koyeb service, the Worker relays only the fixed `/embed` and selected `/uf/*` routes there with its private `ACCESS_KEY`. Search and catalogue requests stay on Cloudflare. Do not expose the server secret in Lampa or in repository files.
 
-**Ashdi geo-block.** Ashdi shows "Плеєр недоступний … в цій країні" to servers in some countries, and Cloudflare's servers can be among
-them (search and playlist from AniTube work, the player page does not). If so, add a *Text* variable `EMBED_URL` to the Worker
-(Settings → Variables and Secrets → Add → Type **Text**) set to the address of another proxy that Ashdi accepts, for example the bot's
-`https://<service>.koyeb.app/anitube`. The Worker then relays only `/embed` there using the same `ACCESS_KEY`, so both must hold the
-same secret. Search and playlist keep going through Cloudflare.
+## Local 1.8.3 candidate: Moon route (not deployed)
+
+`cloudflare-worker.js` adds `GET /moon?url=<public iframe>&key=<key>`, accepting only HTTPS `moonanime.net` / `moonanime.art` (optionally `www`) with `/iframe/<id>` paths, no credentials, custom ports, query or fragment. Authentication is unchanged, redirects are refused, provider failures become HTTP 424. No video is proxied and no provider JavaScript is executed by the Worker.
+
+This updated Worker has not been deployed. Native Android tries the Moon page directly; Smart TV tries a browser request, then this route. The real sample returned HTTP 400 / `500`, so current Moon playback is unverified. Do not replace this failure with a claim that a Worker update alone fixes it.

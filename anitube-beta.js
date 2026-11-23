@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.23';
+    var VERSION = '2.0.24';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 8000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -453,20 +453,28 @@
 
     // ---- Network: Lampa's native request on Android first, Netlify proxy as fallback -------------------------------
     // Address of the optional home-network helper (home-proxy/server.mjs) for TVs that cannot reach AniTube themselves.
-    // The owner's own Cloudflare Worker, built in so nothing has to be typed on a TV. Anything entered in Settings -> AniTube wins.
+    // The public Cloudflare Worker is built in; it does not need a client key. A key is only used for a custom proxy or the home box.
     var DEFAULT_PROXY = 'https://anitube-proxy.dezmand39.workers.dev';
-    var DEFAULT_KEY = '';
     function customProxy() {
         var value = '';
         try { value = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_proxy')) || '').trim().replace(/\/+$/, ''); } catch (e) {}
         return /^https?:\/\/\S+$/i.test(value) ? value : '';
     }
     function homeProxy() { return customProxy() || DEFAULT_PROXY; }
-    // Secret for a helper that is reachable from the internet; it is typed in Lampa and never shipped in this public file.
-    function homeKey() {
+    // The built-in Worker is public. A saved custom-proxy key is never attached to its requests.
+    function storedProxyKey() {
         var typed = '';
         try { typed = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_proxy_key')) || '').trim(); } catch (e) {}
         return typed;
+    }
+    function homeKey() { return customProxy() ? storedProxyKey() : ''; }
+    function clearLegacyWorkerKey() {
+        var box = '';
+        try { box = String((window.Lampa && Lampa.Storage && Lampa.Storage.field('anitube_box')) || '').trim(); } catch (e) {}
+        // The old built-in Worker key is no longer needed. Preserve the setting only for a custom proxy or home box.
+        if (!customProxy() && !box) {
+            try { if (window.Lampa && Lampa.Storage) Lampa.Storage.set('anitube_proxy_key', '', true); } catch (e) {}
+        }
     }
     function homeUrl(home, action, name, value) {
         var key = homeKey();
@@ -525,7 +533,7 @@
     function boxRequest(path, params, dataType, success, failure) {
         var base = boxAddress();
         if (!base) return failure(null);
-        var key = homeKey();
+        var key = storedProxyKey();
         var query = Object.keys(params).filter(function (name) { return params[name] !== '' && params[name] != null; })
             .map(function (name) { return name + '=' + encodeURIComponent(params[name]); });
         if (key) query.push('key=' + encodeURIComponent(key));
@@ -4173,7 +4181,7 @@
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
                 param: {name: 'anitube_proxy_key', type: 'input', values: '', 'default': '', placeholder: 'ключ доступу'},
-                field: {name: 'Ключ проксі', description: 'Введи ACCESS_KEY свого Worker або ретранслятора. Значення зберігається лише в Lampa.'}
+                field: {name: 'Ключ власного проксі / приставки', description: 'Для вбудованого Worker ключ не потрібен. Заповнюй лише для власного проксі або захищеної приставки.'}
             });
         } catch (e) {}
     }
@@ -4213,6 +4221,7 @@
         if (window.plugin_anitube_prototype_ready) return;
         window.plugin_anitube_prototype_ready = true;
         restoreMoonPlayer();
+        clearLegacyWorkerKey();
         addTemplates();
         addSettings();
         followStart();

@@ -1,46 +1,46 @@
 // Cloudflare Worker version of the AniTube helper (same three routes as server.mjs and the bot's /anitube routes).
 //
-// Paste this whole file into a Worker (Cloudflare dashboard -> Workers & Pages -> Create -> Worker -> Edit code), deploy it, and add
-// a secret named ACCESS_KEY (Settings -> Variables and Secrets -> Add -> Type: Secret). In Lampa: Settings -> AniTube ->
-// "Адреса проксі" = the Worker address (https://<name>.<account>.workers.dev), "Ключ проксі" = the same secret.
+// The catalogue/player routes are public and the plugin does not send a client key.
+// If EMBED_URL relays requests to the bot, keep a private ACCESS_KEY secret in this Worker and the matching
+// ANITUBE_ACCESS_KEY secret on the bot. This secret is only for Worker -> bot requests, never for Lampa clients.
 //
-//   GET /search?q=<text>&key=<key>     AniTube search page (HTML)
-//   GET /playlist?url=<page>&key=<key> one AniTube show's playlist (JSON)
-//   GET /moon?url=<page>&key=<key>     a public moonanime.net/art iframe page
-//   GET /animeon?id=<episode>&key=<key>  the Ashdi page of one AnimeOn episode
-//   GET /dorama/player?id=<id>&ep=<episode>&track=<voice>&key=<key>  DoramaUA's public player page; media stays direct
-//   GET /embed?url=<page>&key=<key>    an Ashdi player page (https://ashdi.vip/vod/<id>) or show page (https://ashdi.vip/serial/<id>)
-//   POST /sync?key=<key>               the plugin's shared follow list ({code, items}); needs a KV namespace bound as SYNC
+//   GET /search?q=<text>     AniTube search page (HTML)
+//   GET /playlist?url=<page> one AniTube show's playlist (JSON)
+//   GET /moon?url=<page>     a public moonanime.net/art iframe page
+//   GET /animeon?id=<episode>  the Ashdi page of one AnimeOn episode
+//   GET /dorama/player?id=<id>&ep=<episode>&track=<voice>  DoramaUA's public player page; media stays direct
+//   GET /embed?url=<page>    an Ashdi player page (https://ashdi.vip/vod/<id>) or show page (https://ashdi.vip/serial/<id>)
+//   POST /sync               the plugin's shared follow list ({code, items}); needs a KV namespace bound as SYNC
 //
 // Second source, uafix.net (same rules: only these addresses, no redirects, nothing stored). uafix refuses Cloudflare's servers (HTTP 403),
 // so when EMBED_URL is set, /uf/search, /uf/page and /uf/episode are relayed to the bot's /uf/* routes (same ACCESS_KEY) the way /embed is.
 // /uf/embed (the zetvideo player page) is fetched here directly.
-//   GET /uf/search?q=<text>&key=<key>   uafix search page (HTML)
-//   GET /uf/page?url=<page>&key=<key>   a show page or an episode page of uafix (HTML)
-//   GET /uf/episode?url=<page>&key=<key> {"player": "https://zetvideo.net/vod/<id>"} taken from an episode page (a small answer)
-//   GET /uf/embed?url=<page>&key=<key>  a zetvideo player page (https://zetvideo.net/vod/<id>)
-//   POST /uf/login?key=<key>            body {login, password}: signs in to the CALLER's own uafix.net account (through the bot) and answers
+//   GET /uf/search?q=<text>   uafix search page (HTML)
+//   GET /uf/page?url=<page>   a show page or an episode page of uafix (HTML)
+//   GET /uf/episode?url=<page> {"player": "https://zetvideo.net/vod/<id>"} taken from an episode page (a small answer)
+//   GET /uf/embed?url=<page>  a zetvideo player page (https://zetvideo.net/vod/<id>)
+//   POST /uf/login            body {login, password}: signs in to the CALLER's own uafix.net account (through the bot) and answers
 //                                       {ok, cookie}. uafix shows the player to a signed-in member from any country. Nothing is stored here;
 //                                       the three /uf routes above then accept &cookie=<that cookie> and pass it to uafix.net only.
 //
 // UA Serials catalogue and HDVB player pages (the HLS media remains a direct stream from the source).
-//   GET /uaserials/search?q=<text>&key=<key>   UA Serials search page (HTML)
-//   GET /uaserials/page?url=<page>&key=<key>   one UA Serials title page (HTML)
-//   GET /uaserials/player?url=<page>&key=<key> one public HDVB iframe page (HTML)
+//   GET /uaserials/search?q=<text>   UA Serials search page (HTML)
+//   GET /uaserials/page?url=<page>   one UA Serials title page (HTML)
+//   GET /uaserials/player?url=<page> one public HDVB iframe page (HTML)
 //
 // Eneyida, Klon UA and BambooUA (DLE catalogues) and the public HDVB player page Eneyida embeds (no Referer, no made-up header).
-//   GET /dle/<eneyida|klon|bamboo>/search?q=<text>&key=<key>  the site's search page (HTML)
-//   GET /dle/<eneyida|klon|bamboo>/page?url=<page>&key=<key>  one title page of that site (HTML)
+//   GET /dle/<eneyida|klon|bamboo>/search?q=<text>  the site's search page (HTML)
+//   GET /dle/<eneyida|klon|bamboo>/page?url=<page>  one title page of that site (HTML)
 //   GET /dle/eneyida/player?url=<page>&key=<key>       https://hdvbua.pro/embd/<id> (a show) or /vid/<id> (a film) (HTML)
-//   GET /kodik/search?site=yummy|jutsu&q=<text>&key=<key>  one catalogue search page (HTML)
-//   GET /kodik/page?site=yummy|jutsu&url=<page>&key=<key>  one catalogue title page (HTML)
-//   GET /kodik/player?site=yummy|jutsu&url=<page>&key=<key> public Kodik player URL from the title page controller (JSON)
-//   GET /kodik/embed?site=yummy|jutsu&url=<kodik-page>&ref=<title-page>&key=<key> Kodik's public stream selector (HTML)
-//   POST /kodik/ftor?key=<key>  passes the selected episode's page-issued form fields to Kodik (JSON)
+//   GET /kodik/search?site=yummy|jutsu&q=<text>  one catalogue search page (HTML)
+//   GET /kodik/page?site=yummy|jutsu&url=<page>  one catalogue title page (HTML)
+//   GET /kodik/player?site=yummy|jutsu&url=<page> public Kodik player URL from the title page controller (JSON)
+//   GET /kodik/embed?site=yummy|jutsu&url=<kodik-page>&ref=<title-page> Kodik's public stream selector (HTML)
+//   POST /kodik/ftor  passes the selected episode's page-issued form fields to Kodik (JSON)
 //
 // Ashdi refuses visitors from outside certain countries, and Cloudflare's servers may sit in one of them. To get the player page
 // from somewhere Ashdi accepts, add a plain-text variable EMBED_URL = the address of the bot's proxy, e.g.
-// https://<service>.koyeb.app/anitube : /embed is then relayed there with the same ACCESS_KEY. Search and playlist stay here.
+// https://<service>.koyeb.app/anitube : /embed and selected /uf routes are relayed there with the private ACCESS_KEY.
 //
 // It fetches only those addresses, follows no redirects, stores nothing, and identifies itself honestly in User-Agent.
 // If a site refuses the request, the answer is HTTP 424 with {"error": "HTTP 403"} (or similar) so the reason is visible.
@@ -68,14 +68,10 @@ function reply(body, status, type) {
 const json = (data, status = 200) => reply(JSON.stringify(data), status, 'application/json; charset=utf-8');
 const html = (text) => reply(text, 200, 'text/html; charset=utf-8');
 
-function sameSecret(given, secret) {
-  const a = new TextEncoder().encode(String(given));
-  const b = new TextEncoder().encode(String(secret));
-  if (a.length !== b.length) return false;
-  if (crypto.subtle && crypto.subtle.timingSafeEqual) return crypto.subtle.timingSafeEqual(a, b);
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
+function requiredRelayKey(env) {
+  const key = String((env && env.ACCESS_KEY) || '').trim();
+  if (key.length < MIN_KEY_LENGTH) throw new UpstreamError('relay_not_configured');
+  return key;
 }
 
 function validPage(raw, host, pathPattern) {
@@ -155,7 +151,7 @@ async function embed(raw, env) {
   const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
   let text;
   if (/^https:\/\/\S+$/.test(relay)) {
-    const target = relay + '/embed?url=' + encodeURIComponent(page) + '&key=' + encodeURIComponent(String(env.ACCESS_KEY).trim());
+    const target = relay + '/embed?url=' + encodeURIComponent(page) + '&key=' + encodeURIComponent(requiredRelayKey(env));
     const response = await fetch(target, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT } });
     if (!response.ok) {
       let reason = 'HTTP ' + response.status;
@@ -178,7 +174,7 @@ const UAFIX_PAGE = /^\/[a-z-]+\/[a-z0-9-]+\/(?:season-\d+-episode-\d+\/)?$/;
 async function ufRelay(path, url, env) {
   const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
   if (!/^https:\/\/\S+$/.test(relay)) return null;
-  const target = relay + '/uf/' + path + '?' + url.searchParams.toString().replace(/(^|&)key=[^&]*/g, '') + '&key=' + encodeURIComponent(String(env.ACCESS_KEY).trim());
+  const target = relay + '/uf/' + path + '?' + url.searchParams.toString().replace(/(^|&)key=[^&]*/g, '') + '&key=' + encodeURIComponent(requiredRelayKey(env));
   const response = await fetch(target, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT } });
   const body = await response.text();
   if (!response.ok) {
@@ -199,7 +195,7 @@ async function ufLogin(request, env) {
   const login = String((body && body.login) || '').trim();
   const password = String((body && body.password) || '');
   if (!login || !password || login.length > 100 || password.length > 200) return json({ ok: false, error: '\u0432\u043a\u0430\u0436\u0456\u0442\u044c \u043b\u043e\u0433\u0456\u043d \u0456 \u043f\u0430\u0440\u043e\u043b\u044c' }, 400);
-  const target = relay + '/uf/login?key=' + encodeURIComponent(String(env.ACCESS_KEY).trim());
+  const target = relay + '/uf/login?key=' + encodeURIComponent(requiredRelayKey(env));
   const response = await fetch(target, { method: 'POST', redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Content-Type': 'application/json' }, body: JSON.stringify({ login, password }) });
   const text = await response.text();
   let answer;
@@ -526,9 +522,6 @@ export default {
     const url = new URL(request.url);
     if (request.method !== 'GET' && !(request.method === 'POST' && (url.pathname === '/sync' || url.pathname === '/uf/login' || url.pathname === '/kodik/ftor'))) return json({ error: 'method_not_allowed' }, 405);
     if (url.pathname === '/health') return json({ ok: true });
-    const key = String((env && env.ACCESS_KEY) || '').trim();
-    if (key.length < MIN_KEY_LENGTH) return json({ error: 'not_configured' }, 503);
-    if (!sameSecret(url.searchParams.get('key') || '', key)) return json({ error: 'forbidden' }, 403);
     try {
       if (url.pathname === '/sync') return await followSync(request, env);
       if (url.pathname === '/search') return await search((url.searchParams.get('q') || '').trim());

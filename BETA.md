@@ -1,4 +1,10 @@
-# ДубльUA beta 2.0.22 — Kodik через YummyAnime та Jut-su (22.11.2026)
+# ДубльUA beta 2.0.24 — ключ Worker залишається на сервері (23.11.2026)
+
+> **2.0.24 — клієнтам не потрібен ключ Worker.** Опублікована бета: `https://dez955.github.io/anionline/anitube-beta.js?v=2.0.24`. Спершу онови Worker: Cloudflare → Workers & Pages → `anitube-proxy` → Edit code → заміни код вмістом [home-proxy/cloudflare-worker.js](home-proxy/cloudflare-worker.js) → Deploy. **Не змінюй** поточні `ACCESS_KEY`, `EMBED_URL` і KV `SYNC` під час цього Deploy. Секрет `ACCESS_KEY` використовується лише для Worker → сервісу на Koyeb і має збігатися з `ANITUBE_ACCESS_KEY` там. Після Deploy додай довгу адресу бети в Lampa; ключ у налаштуваннях плагіна для вбудованого Worker вводити не потрібно. Фіксовані маршрути Worker відкриті для публічного використання; довільні адреси як проксі не приймаються. Основний `anitube.js` і коротка адреса A не змінюються.
+
+# Попередні нотатки бети
+
+> Нижче збережено історію тестування старіших версій. Поточні кроки й адреса вказані вище.
 
 > **2.0.22: нове джерело Kodik.** Бета: `https://dez955.github.io/anionline/anitube-beta.js?v=2.0.22`. Увімкни **Показувати російські джерела**, відкрий картку аніме → **ДубльUA** → **Джерело** → **Kodik (YummyAnime / Jut-su)**. Перевірений приклад: «Кіберпанк: Бегущие по краю», 2 сезон — 10 серій, перша відтворюється через HLS 720p. Для Samsung/LG онови Worker: Cloudflare → Workers & Pages → `anitube-proxy` → Edit code → заміни код вмістом [home-proxy/cloudflare-worker.js](home-proxy/cloudflare-worker.js) → Deploy. Значення `ACCESS_KEY`, `EMBED_URL` і сховище `SYNC` не змінюй. 1080p є лише коли цю якість віддає сам Kodik; у перевіреній серії доступно до 720p. На фізичному ТВ ще не перевірено. Основний файл `anitube.js` 1.8.19 і коротка адреса A не змінені.
 

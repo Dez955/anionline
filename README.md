@@ -48,7 +48,7 @@ The card's names in all languages are searched at once (Ukrainian and Russian fi
 
 ## Samsung Tizen / LG webOS
 
-These TVs cannot read AniTube or Ashdi pages themselves (no CORS permission), so the plugin goes through a small helper, by default the owner's Cloudflare Worker (`home-proxy/cloudflare-worker.js`), which relays the Ashdi pages through the owner's bot. Its address and key are built into the plugin; anything typed in Settings → AniTube overrides them. The key is public in this repository and can be rotated (Worker secret, the bot's `ANITUBE_ACCESS_KEY`, the constant in `anitube.js`). Details are in [`home-proxy/README.md`](home-proxy/README.md).
+These TVs cannot read AniTube or Ashdi pages themselves (no CORS permission), so the plugin uses the owner's Cloudflare Worker (`home-proxy/cloudflare-worker.js`). The fixed catalogue and player routes are public and the plugin sends no client secret. When the Worker relays an Ashdi or UAflix request to the owner's existing Koyeb service, its private `ACCESS_KEY` must match that service's `ANITUBE_ACCESS_KEY`; neither value is shipped in the plugin. A custom proxy or home box can still use its own key in Settings → ДубльUA. Details are in [`home-proxy/README.md`](home-proxy/README.md).
 
 Makhno and AnimeOn call a public server directly; Makhno also reads the Ashdi show page, which on a Smart TV goes through the same helper as the Ashdi player pages.
 
