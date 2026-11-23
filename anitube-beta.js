@@ -5,8 +5,8 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.24';
-    var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 8000;
+    var VERSION = '2.0.25';
+    var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 7000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
     var ANIMEON_AHEAD = 6, ANIMEON_BEHIND = 1;
@@ -1465,6 +1465,32 @@
     }
 
     var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', bamboo: 'BambooUA', kodik: 'Kodik (YummyAnime / Jut-su)', dorama: 'DoramaUA', anilibria: 'AniLibria (рос.)'};
+    // Prefer catalogues that fit the Lampa card. These lists contain only sources already supported by this plugin;
+    // hidden and Russian-only sources are filtered by sourceAllowed() before a search starts.
+    var CONTENT_SOURCE_ORDER = {
+        anime: ['anitube', 'animeon', 'uafilms', 'uafix', 'uaserials', 'klon', 'eneyida', 'anilibria'],
+        movie: ['uafilms', 'uafix', 'klon', 'uaserials', 'eneyida', 'bamboo'],
+        series: ['uaserials', 'uafilms', 'uafix', 'klon', 'eneyida'],
+        dorama: ['bamboo', 'dorama', 'uaserials', 'uafilms', 'uafix', 'klon', 'eneyida']
+    };
+    function cardContentType(movie) {
+        movie = movie || {};
+        var genres = (movie.genres || []).map(function (genre) { return genre && typeof genre === 'object' ? genre.id : genre; }).concat(movie.genre_ids || []).map(Number);
+        var isAnimation = genres.indexOf(16) >= 0;
+        var language = String(movie.original_language || '').toLowerCase();
+        var countries = [].concat(movie.origin_country || []).concat((movie.production_countries || []).map(function (country) { return country && country.iso_3166_1; }))
+            .map(function (country) { return String(country || '').toUpperCase(); });
+        var eastAsian = /^(ja|zh|cn|ko)$/.test(language) || countries.some(function (country) { return /^(JP|CN|KR|TW|HK)$/.test(country); });
+        var tv = !!(movie.media_type === 'tv' || movie.name || movie.number_of_seasons || movie.first_air_date);
+        // Animation alone is not enough: this avoids treating ordinary Western cartoons as anime.
+        if (isAnimation && (eastAsian || (!language && !countries.length))) return 'anime';
+        if (tv && eastAsian) return 'dorama';
+        return tv ? 'series' : 'movie';
+    }
+    function sourceOrderFor(movie) {
+        var order = CONTENT_SOURCE_ORDER[cardContentType(movie)] || CONTENT_SOURCE_ORDER.movie;
+        return order.filter(function (name) { return sourceAllowed(name); });
+    }
     // Read the site's public API directly on Android, through the owner's Worker on TVs.
     function animeonApi(action, params, success, failure) {
         var paths = {search: '/anime?search=' + encodeURIComponent(params.q || ''),
@@ -1925,6 +1951,13 @@
     function sourceAllowed(name) {
         return sourceVisible(name) && (!RUSSIAN_SOURCES[name] || russianEnabled());
     }
+    function autoSourceSwitchEnabled() {
+        try {
+            var value = Lampa.Storage.field('anitube_auto_source');
+            if (value == null || value === '') return true;
+            return value === true || value === 'true' || value === 1 || value === '1';
+        } catch (e) { return true; }
+    }
     function sourceSettings() {
         var back = Lampa.Controller.enabled().name;
         function show() {
@@ -2116,7 +2149,7 @@
         var html, scroll, body, rows = [], cur = {r: 0, c: 0};
         var results = [], item = null, voices = [], voiceIndex = 0, entries = [], closed = false, manual = '', tmdbCache = {}, token = 0;
         var titleLookupsPending = false, searchRequestId = 0;
-        var isTv = !!(movie.name || movie.number_of_seasons || movie.first_air_date);
+        var isTv = !!(movie.media_type === 'tv' || movie.name || movie.number_of_seasons || movie.first_air_date);
         // The star on the card asked for this title to be followed as soon as its AniTube page is opened; used once.
         var pendingFollow = !!object.follow;
         object.follow = false;
@@ -2150,11 +2183,13 @@
             Lampa.Storage.set('anitube_choice', all);
         }
         var key = String(movie.id || movie.original_title || movie.title || '');
-        // The source is remembered per card. While none is remembered and a search finds nothing, the next one in ORDER is tried.
-        var source = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : 'anitube', fellBack = !!saved(key).source && !!SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source); // a saved source that no longer exists (Makhno) is just forgotten
+        // A remembered user choice wins; otherwise start with the first enabled catalogue for this card type.
+        var ORDER = sourceOrderFor(movie);
+        var rememberedSource = SOURCE_NAMES[saved(key).source] && sourceAllowed(saved(key).source) ? saved(key).source : '';
+        var source = rememberedSource || ORDER[0] || '', fellBack = !!rememberedSource;
         var qualityCache = {}, qualityBusy = 0, qualityQueue = [], streamMetadata = {}, streamWaiting = {};
-        var ORDER = ['anitube', 'uafilms', 'animeon', 'uafix', 'uaserials', 'eneyida', 'klon', 'bamboo', 'kodik', 'dorama', 'anilibria'], extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [];
-        if (!sourceAllowed(source)) source = ORDER.filter(sourceAllowed)[0] || '';
+        var extraTerms = [], lastQueries = [], openSeq = 0, seasonOrder = [], sourceStartedAt = Date.now();
+        if (!sourceAllowed(source)) source = ORDER[0] || '';
         var playSeq = 0, launching = false;
         var playbackMessage = '', moonWatchStop = null, moonQualityStop = null, playbackListener = null, playerCloseListener = null;
         var playbackOwner = 'anitube-' + Date.now() + '-' + Math.random();
@@ -2667,6 +2702,7 @@
             if (!value) Lampa.Noty.show('Ручну назву скинуто, шукаю за назвами картки');
             // AniTube often names a show differently from the card, so the title can be chosen or typed (and is remembered).
             manual = value;
+            sourceStartedAt = Date.now();
             var queries = Object.assign({}, saved(key).queries || {});
             if (manual) queries[source] = manual; else delete queries[source];
             remember(key, {queries: queries, query: '', title: ''});
@@ -2744,7 +2780,7 @@
                 self.empty(spec.nothing(manual, list.length));
             }
             // A missing or very slow alternate-name response must not keep the source screen on its loader indefinitely.
-            settleTimer = setTimeout(finish, SEARCH_BUDGET);
+            settleTimer = setTimeout(finish, Math.max(0, sourceStartedAt + SEARCH_BUDGET - Date.now()));
             names.forEach(function (query) {
                 spec.fetch(query, function (items) {
                     if (completed || !current()) return;
@@ -2859,13 +2895,15 @@
             this.searchMany(specs[source], requestId);
         };
 
-        // When nothing is found and the source was not chosen by hand, the next one in ORDER is searched.
+        // When nothing is found and the source was not chosen by hand, try the next enabled source for this card type.
         this.nextSource = function () {
             var next = ORDER[ORDER.indexOf(source) + 1];
             while (next && !sourceAllowed(next)) next = ORDER[ORDER.indexOf(next) + 1];
-            if (manual || fellBack || !next) return false;
+            if (manual || fellBack || !autoSourceSwitchEnabled() || !next) return false;
             source = next;
             manual = manualFor(next);
+            sourceStartedAt = Date.now();
+            openSeq++;
             return true;
         };
 
@@ -2877,6 +2915,7 @@
             source = name;
             fellBack = true;
             manual = manualFor(name);
+            sourceStartedAt = Date.now();
             remember(key, {source: name, title: ''});
             results = []; item = null; voices = []; seasons = {}; season = 0;
             this.loading(true);
@@ -2888,10 +2927,8 @@
             if (/нічого/.test(message) && !manual && lastQueries.length) {
                 message += ' Шукали: ' + lastQueries.slice(0, 3).map(function (q) { return '«' + q + '»'; }).join(', ') + ' та ще ' + Math.max(0, lastQueries.length - 3) + ' назв.';
             }
-            if (source === 'anitube') {
-                var others = ORDER.filter(function (name) { return name !== 'anitube' && sourceAllowed(name); }).map(function (name) { return SOURCE_NAMES[name]; });
-                message += ' Можна вибрати інше джерело (' + others.join(', ') + ') у чипі «Джерело».';
-            }
+            var others = ORDER.filter(function (name) { return name !== source && sourceAllowed(name); }).map(function (name) { return SOURCE_NAMES[name]; });
+            if (others.length) message += ' Можна вручну спробувати відповідні джерела: ' + others.join(', ') + ' — чип «Джерело».';
             this.draw(message);
             this.loading(false);
             this.start(true);
@@ -3011,6 +3048,7 @@
             return Array.from({length: Math.min(count, 60)}, function (v, i) { return i + 1; });
         }
         this.openUafilms = function () {
+            sourceStartedAt = Date.now();
             seasons = {};
             uafilmsSeasonNumbers().forEach(function (number) { seasons[number] = []; });
             var numbers = Object.keys(seasons).map(Number);
@@ -3019,14 +3057,25 @@
         };
         // The voices of a season are the players of its first episode; every episode is then asked for the same voice when it is played.
         this.useUafilmsSeason = function (number, fresh) {
-            var mine = openSeq, tmdb = item.ref.tmdb;
+            var mine = openSeq, tmdb = item.ref.tmdb, fallbackTimer = null;
             this.loading(true);
+            if (fresh && source === 'uafilms' && !fellBack && autoSourceSwitchEnabled()) {
+                fallbackTimer = setTimeout(function () {
+                    if (closed || mine !== openSeq || !self.nextSource()) return;
+                    self.search(0);
+                }, Math.max(0, sourceStartedAt + SEARCH_BUDGET - Date.now()));
+            }
+            function clearFallbackTimer() {
+                if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+            }
             function fail(message) {
+                clearFallbackTimer();
                 if (closed || mine !== openSeq) return;
                 if (fresh && self.nextSource()) return self.search(0);
                 self.empty(message);
             }
             uafilmsSources(tmdb, isTv ? number : 0, 1, function (variants) {
+                clearFallbackTimer();
                 if (closed || mine !== openSeq) return;
                 if (!variants.length) return fail('UAFilms: для ' + (isTv ? number + ' сезону ' : '') + 'цієї картки немає озвучень з плеєрами Ashdi, UAflix чи Moon.');
                 countEpisodes(number, function (count) {
@@ -4089,6 +4138,11 @@
                 param: {name: 'anitube_sources', type: 'button'},
                 field: {name: 'Показати / сховати джерела', description: 'Вибери джерела для меню й автоматичного пошуку. Збережені вибори не видаляються.'},
                 onChange: sourceSettings
+            });
+            Lampa.SettingsApi.addParam({
+                component: 'anitube',
+                param: {name: 'anitube_auto_source', type: 'trigger', 'default': true},
+                field: {name: 'Автоматично переходити до іншого джерела', description: 'Увімкнено: якщо джерело не знайшло результат за 7 секунд, буде спробуване наступне відповідне джерело. Приховані джерела пропускаються. Вимкнено: вибирай інше джерело вручну.'}
             });
             Lampa.SettingsApi.addParam({
                 component: 'anitube',
