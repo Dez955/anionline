@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.29';
+    var VERSION = '2.0.30';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 5000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1154,8 +1154,68 @@
     // The season and episode go in the address; the plugin never asks Kodik for a direct stream address.
     function kodikIframeUrl(ref) {
         if (!ref || !kodikEmbed(ref.embedUrl) || !(ref.season > 0) || !(ref.number > 0)) return '';
-        return ref.embedUrl + '?season=' + ref.season + '&episode=' + ref.number;
+        return ref.embedUrl + '?season=' + ref.season + '&episode=' + ref.number + '&hide_selectors=true&hide_resume_button=true';
     }
+    // Kodik's own player in a full-screen frame. Kodik's player API (postMessage) tells the page the time, the episode and the end of the video
+    // and accepts play / pause / seek, so the remote works through Lampa: OK pauses or starts, left / right seek by ten seconds, Back closes.
+    // The first start needs a real user action inside the player (Kodik's rule); the OK key sends `play`, and a click or touch works as well.
+    var kodikFrame = null;
+    function kodikFrameClose() {
+        var frame = kodikFrame;
+        if (!frame) return;
+        kodikFrame = null;
+        window.removeEventListener('message', frame.listener);
+        clearTimeout(frame.hintTimer);
+        if (frame.node && frame.node.parentNode) frame.node.parentNode.removeChild(frame.node);
+        try { if (window.Lampa && Lampa.Controller && Lampa.Controller.remove) Lampa.Controller.remove('anitube_kodik'); } catch (e) {}
+        if (frame.handlers.onClose) frame.handlers.onClose(frame.state);
+    }
+    function kodikFrameOpen(url, handlers) {
+        kodikFrameClose();
+        var node = document.createElement('div'), iframe = document.createElement('iframe'), hint = document.createElement('div');
+        node.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:1000;background:#000';
+        iframe.setAttribute('allow', 'autoplay *; fullscreen *');
+        iframe.setAttribute('allowfullscreen', 'true');
+        iframe.setAttribute('frameborder', '0');
+        iframe.style.cssText = 'width:100%;height:100%;border:0;display:block';
+        hint.textContent = 'ОК — пауза / відтворення · ← → — перемотка 10 с · Назад — закрити';
+        hint.style.cssText = 'position:absolute;left:0;right:0;bottom:2%;text-align:center;color:#fff;font-size:1.3em;text-shadow:0 0 4px #000;pointer-events:none';
+        iframe.src = url;
+        node.appendChild(iframe); node.appendChild(hint); document.body.appendChild(node);
+        var state = {time: 0, duration: 0, playing: false, started: false};
+        function send(value) { try { iframe.contentWindow.postMessage({key: 'kodik_player_api', value: value}, '*'); } catch (e) {} }
+        function listener(event) {
+            if (event.source !== iframe.contentWindow || !event.data || typeof event.data.key !== 'string' || event.data.key.indexOf('kodik_player_') !== 0) return;
+            var value = event.data.value;
+            switch (event.data.key) {
+                case 'kodik_player_play': case 'kodik_player_video_started': state.playing = true; state.started = true; break;
+                case 'kodik_player_pause': state.playing = false; break;
+                case 'kodik_player_duration_update': if (+value > 0) state.duration = +value; break;
+                case 'kodik_player_time_update': case 'kodik_player_time':
+                    if (+value >= 0) { state.time = +value; if (handlers.onTime) handlers.onTime(state.time, state.duration); }
+                    break;
+                case 'kodik_player_seek': if (value && +value.time >= 0) state.time = +value.time; break;
+                case 'kodik_player_current_episode': if (value && handlers.onEpisode) { state.time = 0; handlers.onEpisode(+value.season || 0, +value.episode || 0); } break;
+                case 'kodik_player_video_ended': state.playing = false; if (handlers.onEnded) handlers.onEnded(); break;
+            }
+        }
+        window.addEventListener('message', listener);
+        kodikFrame = {node: node, listener: listener, handlers: handlers, state: state, send: send, hintTimer: setTimeout(function () { hint.style.display = 'none'; }, 9000)};
+        // The remote: Lampa's controller owns the keys, the player (another origin) gets commands.
+        try {
+            Lampa.Controller.add('anitube_kodik', {
+                toggle: function () {},
+                enter: function () { if (!state.started || !state.playing) send({method: 'play'}); else send({method: 'pause'}); },
+                left: function () { send({method: 'seek', seconds: Math.max(0, state.time - 10)}); },
+                right: function () { send({method: 'seek', seconds: state.time + 10}); },
+                up: function () {}, down: function () {},
+                back: kodikFrameClose
+            });
+            Lampa.Controller.toggle('anitube_kodik');
+        } catch (e) {}
+        return kodikFrame;
+    }
+
     // Search and the player page go through the owner's Worker (the API token lives there); Android can also read the public player page directly.
     function kodikRequest(action, args, success, failure, scope) {
         args = args || {};
@@ -3685,14 +3745,37 @@
             };
         };
 
-        // Kodik's own web player (with its ads) in Lampa's full-screen frame; Back returns to the list. Watch progress is not tracked there.
+        // Kodik's own web player (with its ads) in a full-screen frame; Back returns to the list. The time and the episode the player reports
+        // are stored as Lampa watch progress, and the player's own switch to the next episode is followed.
         this.playKodik = function (entry) {
             var url = kodikIframeUrl(entry.ref);
             if (!url) return Lampa.Noty.show('Kodik: для цієї серії немає адреси плеєра.');
-            if (!(window.Lampa && Lampa.Iframe && typeof Lampa.Iframe.show === 'function')) return Lampa.Noty.show('Цей випуск Lampa не вміє відкривати вікно Kodik. Оновіть Lampa.');
-            var back = Lampa.Controller.enabled().name;
+            var current = entry, savedAt = 0, back = Lampa.Controller.enabled().name;
+            function save(force) {
+                var view = current && current.timeline;
+                if (!view || !(view.duration > 0) || !window.Lampa || !Lampa.Timeline || typeof Lampa.Timeline.update !== 'function') return;
+                if (!force && Date.now() - savedAt < 10000) return;
+                savedAt = Date.now();
+                Lampa.Timeline.update(view);
+            }
             Lampa.Noty.show('ДубльUA v' + VERSION + ' · Kodik (власний плеєр)');
-            Lampa.Iframe.show({url: url, onBack: function () { if (!closed) Lampa.Controller.toggle(back); }});
+            kodikFrameOpen(url, {
+                onTime: function (time, duration) {
+                    var view = current && current.timeline;
+                    if (!view || !(duration > 0)) return;
+                    view.time = time; view.duration = duration; view.percent = Math.min(100, Math.round(time / duration * 100));
+                    save(false);
+                },
+                onEpisode: function (seasonNumber, episodeNumber) {
+                    var next = entries.filter(function (other) { return other.ref && other.ref.season === seasonNumber && other.ref.number === episodeNumber; })[0];
+                    if (next && next !== current) { save(true); current = next; }
+                },
+                onEnded: function () {
+                    var view = current && current.timeline;
+                    if (view) { view.percent = 100; if (view.duration > 0) view.time = view.duration; save(true); }
+                },
+                onClose: function () { save(true); if (!closed) { try { Lampa.Controller.toggle(back); } catch (e) {} } }
+            });
         };
 
         this.play = function (index) {
@@ -4507,6 +4590,7 @@
             items: [
                 {title: 'ДОДАНО', separator: true},
                 {title: 'Kodik через офіційний API', subtitle: 'Пошук за кодом IMDb або назвою; озвучення читаються зі сторінки плеєра. Ключ зберігається на сервері, не в плагіні.'},
+                {title: 'Керування плеєром Kodik', subtitle: 'ОК — пауза, стрілки — перемотка 10 с, Назад — закрити; прогрес зберігається в Lampa.'},
                 {title: 'Мова пошуку за джерелом', subtitle: 'Російські джерела шукають російською назвою, українські — українською.'},
                 {title: 'Порядок серій окремо для тайтла', subtitle: 'Новий тайтл іде від першої, наздогнаний — з нової серії.'},
                 {title: 'ПРИБРАНО', separator: true},
@@ -4514,7 +4598,7 @@
                 {title: 'ЗМІНЕНО', separator: true},
                 {title: 'Kodik: лише серіали', subtitle: 'Фільми Kodik мають інший плеєр і ще не підтримуються.'},
                 {title: 'У ПРОЦЕСІ', separator: true},
-                {title: 'Перевірка на телевізорі', subtitle: 'Очікує тесту бети 2.0.29 на Samsung / LG.'}
+                {title: 'Перевірка на телевізорі', subtitle: 'Очікує тесту бети 2.0.30 на Samsung / LG.'}
             ],
             onBack: function () { Lampa.Controller.toggle(back); }
         });
