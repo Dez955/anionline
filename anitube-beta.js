@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.27';
+    var VERSION = '2.0.28';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 5000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -2398,9 +2398,31 @@
         // The star on the card asked for this title to be followed as soon as its AniTube page is opened; used once.
         var pendingFollow = !!object.follow;
         object.follow = false;
-        var descending = Lampa.Storage.get('anitube_episode_order', 'asc') === 'desc';
+        // Newest-first or oldest-first belongs to one title (anitube_choice[<id>].order). Without a hand-made choice it follows
+        // the viewer: someone caught up with the series sees the newest episode on top; someone at the beginning starts from episode 1.
+        var descending = false;
 
         function saved(key) { var all = Lampa.Storage.get('anitube_choice', '{}'); return (all && all[key]) || {}; }
+        function episodeHash(episode, info) {
+            return Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'kodik' || source === 'dorama' ? '#s' + season : '') + ':' + (info.number || info.original));
+        }
+        // True when at most two numbered episodes are left after the last one this viewer started.
+        function caughtUp(voice) {
+            if (!item || !voice) return false;
+            var numbers = [], last = 0;
+            voice.episodes.forEach(function (episode) {
+                var info = episodeInfo(episode.title, item.title);
+                if (!info.number) return;
+                numbers.push(info.number);
+                var view = Lampa.Timeline.view(episodeHash(episode, info));
+                if (view && view.percent > 0 && info.number > last) last = info.number;
+            });
+            return last > 0 && numbers.filter(function (n) { return n > last; }).length <= 2;
+        }
+        function orderFor(voice) {
+            var own = saved(key).order;
+            return own === 'desc' || own === 'asc' ? own === 'desc' : caughtUp(voice);
+        }
         // The player the owner picked by hand wins; otherwise the team's default. This is the variant a voice opens.
         function voiceFor(label) {
             var player = saved(key).player;
@@ -2779,9 +2801,10 @@
             }
             if (voice && voice.episodes.length > 1) {
                 var orderColumn = first.length;
+                descending = orderFor(voice);
                 var orderButton = chip('', '', descending, function () {
                     descending = !descending;
-                    Lampa.Storage.set('anitube_episode_order', descending ? 'desc' : 'asc');
+                    remember(key, {order: descending ? 'desc' : 'asc'});
                     self.focusEpisode = false;
                     self.draw();
                     focusAt(0, orderColumn);
@@ -2849,9 +2872,10 @@
 
         this.episodes = function (current, voice) {
             if (!voice) return;
+            descending = orderFor(voice);
             entries = voice.episodes.map(function (episode) {
                 var info = episodeInfo(episode.title, item.title);
-                var hash = Lampa.Utils.hash(item.url + (source === 'uafix' || source === 'uafilms' || source === 'uaserials' || source === 'eneyida' || source === 'klon' || source === 'bamboo' || source === 'kodik' || source === 'dorama' ? '#s' + season : '') + ':' + (info.number || info.original));
+                var hash = episodeHash(episode, info);
                 return {url: episode.url, ref: episode.ref, kind: episode.kind, wantSubtitles: episode.subtitles, subtitles: episode.subs, quality: episode.quality || 0, supported: voice.supported !== false, player: voice.player || '', info: info, title: info.label, timeline: Lampa.Timeline.view(hash)};
             });
             entries = episodeOrder(entries, false).map(function (index) { return entries[index]; });
