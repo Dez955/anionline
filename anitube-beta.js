@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.30';
+    var VERSION = '2.0.31';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 5000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1155,6 +1155,21 @@
     function kodikIframeUrl(ref) {
         if (!ref || !kodikEmbed(ref.embedUrl) || !(ref.season > 0) || !(ref.number > 0)) return '';
         return ref.embedUrl + '?season=' + ref.season + '&episode=' + ref.number + '&hide_selectors=true&hide_resume_button=true';
+    }
+    function kodikOnlinePlugins() {
+        if (!Lampa.Component || typeof Lampa.Component.get !== 'function') return [];
+        return [
+            {title: 'Z01 Online', component: 'lampac_z'},
+            {title: 'BWA Online', component: 'bwa_online'}
+        ].filter(function (plugin) { return typeof Lampa.Component.get(plugin.component) === 'function'; });
+    }
+    function openKodikOnline(plugin, movie) {
+        var title = movie.title || movie.name || '';
+        Lampa.Activity.push({
+            url: '', title: plugin.title, component: plugin.component,
+            search: title, search_one: title, search_two: movie.original_title || movie.original_name || '',
+            movie: Object.assign({}, movie), page: 1, clarification: false
+        });
     }
     // Kodik's own player in a full-screen frame. Kodik's player API (postMessage) tells the page the time, the episode and the end of the video
     // and accepts play / pause / seek, so the remote works through Lampa: OK pauses or starts, left / right seek by ten seconds, Back closes.
@@ -2833,6 +2848,16 @@
                 first.push(star);
             }
             // The list of followed titles is opened from the star in Lampa's header and from the bell; no chip for it on every page.
+            var onlinePlugins = source === 'kodik' ? kodikOnlinePlugins() : [];
+            if (onlinePlugins.length) {
+                first.push(chip('Дивитися через', '', false, function () {
+                    Lampa.Select.show({
+                        title: 'Відкрити цей тайтл', items: onlinePlugins,
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (plugin) { openKodikOnline(plugin, movie); }
+                    });
+                }, true));
+            }
             first.push(chip('Пошук', manual || '', false, function () { self.ask(); }));
             addRow(first);
 
@@ -4589,6 +4614,7 @@
             title: 'ДубльUA · версія ' + VERSION,
             items: [
                 {title: 'ДОДАНО', separator: true},
+                {title: 'Перехід до Z01 або BWA', subtitle: 'На екрані Kodik «Дивитися через» відкриває той самий тайтл у встановленому плагіні.'},
                 {title: 'Kodik через офіційний API', subtitle: 'Пошук за кодом IMDb або назвою; озвучення читаються зі сторінки плеєра. Ключ зберігається на сервері, не в плагіні.'},
                 {title: 'Керування плеєром Kodik', subtitle: 'ОК — пауза, стрілки — перемотка 10 с, Назад — закрити; прогрес зберігається в Lampa.'},
                 {title: 'Мова пошуку за джерелом', subtitle: 'Російські джерела шукають російською назвою, українські — українською.'},
@@ -4598,7 +4624,7 @@
                 {title: 'ЗМІНЕНО', separator: true},
                 {title: 'Kodik: лише серіали', subtitle: 'Фільми Kodik мають інший плеєр і ще не підтримуються.'},
                 {title: 'У ПРОЦЕСІ', separator: true},
-                {title: 'Перевірка на телевізорі', subtitle: 'Очікує тесту бети 2.0.30 на Samsung / LG.'}
+                {title: 'Перевірка на телевізорі', subtitle: 'Очікує тесту бети 2.0.31 на Samsung / LG.'}
             ],
             onBack: function () { Lampa.Controller.toggle(back); }
         });
