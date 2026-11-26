@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.32';
+    var VERSION = '2.0.33';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 5000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1642,14 +1642,16 @@
         authorize(false);
         return cancel;
     }
-    // Only players this plugin reads itself: Ashdi and zetvideo by number, Moon by its page. Tortuga/Fenix would mean playing
-    // through the catalogue's own relay, so they are left out.
+    // Players this plugin reads itself come first: Ashdi and zetvideo by number, Moon by its page (the video then comes straight from the hosting).
+    // Every other player of the catalogue (Tortuga, Fenix, UFDub, ...) is offered as the catalogue's own HLS relay, the same address its Lampa
+    // client plays, and goes after them: without it a card whose voices exist only there looked as if the catalogue had nothing.
     function uafilmsVariants(data) {
         var seen = {};
         return (data && Array.isArray(data.sources) ? data.sources : []).map(function (s) {
-            if (!s || !s.provider || typeof s.provider.id !== 'string' || !/^(ashdi|zetvideo|moonanime)$/.test(s.provider.id) ||
-                typeof s.url !== 'string' || s.streamable === false) return null;
-            var provider = s.provider.id, params = {}, page = '';
+            if (!s || !s.provider || typeof s.provider.id !== 'string' || !/^[a-z0-9_-]{2,30}$/.test(s.provider.id) ||
+                typeof s.url !== 'string' || s.url.length > 2000 || s.streamable === false) return null;
+            var provider = s.provider.id, params = {}, page = '', relay = '';
+            var direct = /^(ashdi|zetvideo|moonanime)$/.test(provider);
             try {
                 var url = new URL(s.url);
                 if (url.origin !== UAFILMS || url.username || url.password || url.pathname !== '/master.m3u8') return null;
@@ -1662,21 +1664,66 @@
             if (provider === 'ashdi' && /^\d{1,10}$/.test(params.id || '')) page = 'https://ashdi.vip/vod/' + params.id;
             else if (provider === 'zetvideo' && /^\d{1,10}$/.test(params.id || '')) page = 'https://zetvideo.net/vod/' + params.id;
             else if (provider === 'moonanime' && moonPage(params.url || '')) page = params.url;
-            if (!page) return null;
-            var player = provider === 'zetvideo' ? 'UAflix' : provider === 'moonanime' ? 'Moon' : 'Ashdi';
+            else if (!direct && (!s.type || s.type === 'hls')) relay = s.url;
+            if (!page && !relay) return null;
+            var name = typeof s.provider.name === 'string' ? s.provider.name.replace(/\s+/g, ' ').trim().slice(0, 30) : '';
+            var player = provider === 'zetvideo' ? 'UAflix' : provider === 'moonanime' ? 'Moon' : provider === 'ashdi' ? 'Ashdi' : name || provider;
             var track = Array.isArray(s.audioTracks) && s.audioTracks.length === 1 ? s.audioTracks[0] : '';
             var trackStudio = Array.isArray(s.audioTrackStudios) && s.audioTrackStudios.length === 1 && s.audioTrackStudios[0];
             var studio = [s.studio && s.studio.name, trackStudio && trackStudio.name, track].filter(function (name) {
                 return typeof name === 'string' && name.trim();
             })[0] || '';
             studio = studio.replace(/\s+/g, ' ').trim();
-            var generic = !studio || studio === 'Ashdi' || studio === 'ZetVideo' || studio === 'Плеєр';
+            var generic = !studio || studio === 'Ashdi' || studio === 'ZetVideo' || studio === 'Плеєр' || studio.toLowerCase() === player.toLowerCase();
             if (generic) studio = s.lang === 'en' ? 'Субтитри' : 'Озвучення';
             var label = generic && player === 'UAflix' ? 'UAflix' : studio + ' · ' + player, key = provider + '|' + studio;
             if (seen[key]) return null;
             seen[key] = true;
-            return {key: key, label: label, player: player, page: page, subs: studio === 'Субтитри'};
-        }).filter(Boolean).sort(function (a, b) { return a.subs - b.subs; }); // the Ukrainian voices first, the subtitled original after them
+            return {key: key, label: label, player: player, page: page, stream: relay, subs: studio === 'Субтитри'};
+        }).filter(Boolean).sort(function (a, b) { return (a.subs - b.subs) || (!!a.stream - !!b.stream); }); // Ukrainian voices first, the subtitled original after them; relayed players after the direct ones
+    }
+    // The catalogue's own search (TMDB-shaped records) is the way to find a card whose TMDB number has no players: the same show can sit under another
+    // number, and its name there is often different. Candidates are judged by everything the record carries, not by the name alone: the names (all of
+    // the card's), the year, movie or series, the original language and the genres. `plain` skips the threshold (a name typed by hand).
+    function uafilmsSimilar(movie, results, extra, plain) {
+        var names = fullNames(movie, extra), cards = names.map(nameWords).filter(function (c) { return c.length; });
+        // The same original title is the surest name trait, in any script (Japanese, Korean): compared with spaces and punctuation removed.
+        var squash = function (value) { return String(value || '').toLowerCase().replace(/[\s\u3000\u30fb!\uff01?\uff1f~\uff5e\-:\uff1a,\uff0c.\u3002'"\u2019()\uff08\uff09]+/g, ''); };
+        var flat = names.map(normalize).filter(Boolean), squashed = names.map(squash).filter(Boolean);
+        var tv = !!(movie.media_type === 'tv' || movie.name || movie.number_of_seasons || movie.first_air_date);
+        var year = parseInt(String(movie.release_date || movie.first_air_date || '').slice(0, 4), 10) || 0;
+        var genres = (movie.genres || []).map(function (g) { return g && typeof g === 'object' ? g.id : g; }).concat(movie.genre_ids || []).map(Number).filter(Boolean);
+        var language = String(movie.original_language || '').toLowerCase(), own = String(movie.id || '');
+        var seen = {};
+        return (Array.isArray(results) ? results : []).map(function (r) {
+            if (!r || !/^\d{1,10}$/.test(String(r.id)) || seen[r.id] || (!plain && String(r.id) === own)) return null;
+            seen[r.id] = true;
+            var resultTv = r.media_type ? r.media_type === 'tv' : !!(r.name && !r.title);
+            if (r.media_type && r.media_type !== 'tv' && r.media_type !== 'movie') return null;
+            var theirs = [r.title, r.name, r.original_title, r.original_name].filter(function (n) { return typeof n === 'string' && n; });
+            var nameScore = Math.min(12, titleScore(theirs, cards));
+            if (theirs.some(function (n) { return (normalize(n) && flat.indexOf(normalize(n)) >= 0) || (squash(n) && squashed.indexOf(squash(n)) >= 0); })) nameScore = 12;
+            var score = nameScore / 12 * 60, why = [];
+            if (nameScore) why.push('назва');
+            var ry = parseInt(String(r.release_date || r.first_air_date || '').slice(0, 4), 10) || 0;
+            if (year && ry) {
+                var gap = Math.abs(year - ry);
+                if (gap === 0) { score += 25; why.push('рік'); } else if (gap === 1) { score += 15; why.push('рік ±1'); } else if (gap > 3) score -= 25;
+            }
+            if (resultTv === tv) { score += 10; why.push(tv ? 'серіал' : 'фільм'); } else score -= 60;
+            if (language && String(r.original_language || '').toLowerCase() === language) { score += 5; why.push('мова'); }
+            var ids = (r.genre_ids || []).map(Number), common = genres.filter(function (g) { return ids.indexOf(g) >= 0; }).length;
+            var union = genres.length + ids.length - common;
+            if (union && common) { score += 10 * common / union; why.push('жанр'); }
+            // The same description is the one trait that does not depend on how the show is named; without it (or a name) the traits above are shared by
+            // half of the catalogue, so they never make a candidate on their own.
+            var shared = 0, mine = nameWords(movie.overview), their = nameWords(r.overview);
+            if (mine.length >= 6 && their.length >= 6) shared = mine.filter(function (w) { return their.some(function (o) { return sameWord(o, w); }); }).length / Math.min(mine.length, their.length);
+            if (shared >= 0.25) why.push('опис');
+            score += Math.min(20, shared * 40);
+            var title = String(r.title || r.name || r.original_title || r.original_name || '').replace(/\s+/g, ' ').trim();
+            return {id: String(r.id), title: shortName(title), year: ry ? String(ry) : '', score: Math.round(score), why: why, original: String(r.original_title || r.original_name || ''), tv: resultTv, anchored: !!nameScore || shared >= 0.25};
+        }).filter(function (c) { return c && (plain || (c.anchored && c.score >= 45)); }).sort(function (a, b) { return b.score - a.score; }).slice(0, plain ? 8 : 5);
     }
 
     var SOURCE_NAMES = {anitube: 'AniTube', uafilms: 'UAFilms', animeon: 'AnimeOn', uafix: 'UAflix', uaserials: 'UA Serials', eneyida: 'Eneyida', klon: 'Klon UA', bamboo: 'BambooUA', kodik: 'Kodik', dorama: 'DoramaUA', anilibria: 'AniLibria (рос.)'};
@@ -3485,7 +3532,49 @@
             if (!/^\d{1,10}$/.test(String(movie.id || ''))) {
                 return self.empty('UAFilms: у картки немає номера TMDB. Спробуй інше джерело.');
             }
-            self.found([{title: displayName() || 'UAFilms', url: 'uafilms:' + movie.id, note: 'UAFilms', ref: {tmdb: String(movie.id)}}], queries);
+            // A name typed by hand is looked up in the catalogue's own search; otherwise the card's TMDB number is used, or the number the
+            // viewer confirmed for this card earlier (the same show can sit under another number there).
+            if (manual) return this.uafilmsAlternatives('', true);
+            var confirmed = /^uafilms:(\d{1,10})$/.exec(rememberedTitle(saved(key), source).title || '');
+            var tmdb = confirmed ? confirmed[1] : String(movie.id);
+            self.found([{title: displayName() || 'UAFilms', url: 'uafilms:' + tmdb, note: 'UAFilms', ref: {tmdb: tmdb}}], queries);
+        };
+        // The card's number has no players in the catalogue: look for the same show there by everything its records carry (names, year, kind,
+        // language, genres) and offer the likely ones for confirmation instead of opening one of them by itself.
+        this.uafilmsAlternatives = function (message, typed) {
+            var requestId = ++searchRequestId, scope = searchScope = {requests: []}, pending = 0, results = [], failure = '';
+            function current() { return !closed && requestId === searchRequestId; }
+            var names = typed ? [manual] : nameTiers(movie, termsFor(sourceLanguage(source)), sourceLanguage(source)).reduce(function (all, tier) { return all.concat(tier); }, []).slice(0, 4);
+            lastQueries = names.slice();
+            var blocked = uafilmsBlocked();
+            function finish() {
+                if (!current()) return;
+                stopSearch();
+                var similar = uafilmsSimilar(movie, results, allTerms(), typed);
+                if (!similar.length) {
+                    var base = typed ? 'UAFilms: за запитом «' + manual + '» нічого не знайдено.' : (message ? 'UAFilms: ' + message + '.' : 'UAFilms: нічого не знайдено.');
+                    return self.empty(base + (failure ? ' Пошук каталогу не відповів (' + failure + ').' : typed ? '' : ' Схожих тайтлів у каталозі за назвою, роком і жанрами теж нема.'));
+                }
+                self.found(similar.map(function (c) {
+                    return {title: c.title, url: 'uafilms:' + c.id, year: c.year, names: [c.title, c.original],
+                        note: [c.year, c.original && c.original !== c.title ? c.original : '', c.tv ? 'серіал' : 'фільм', 'збіг ' + Math.max(1, Math.min(99, c.score)) + '% (' + c.why.join(', ') + ')'].filter(Boolean).join(' · '),
+                        ref: {tmdb: c.id}};
+                }), names, true);
+            }
+            if (!names.length || blocked) { failure = blocked; return finish(); }
+            pending = names.length;
+            names.forEach(function (name) {
+                ajaxScoped({url: UAFILMS + '/search?q=' + encodeURIComponent(name), dataType: 'json', timeout: 8000, cache: false,
+                    success: function (data) {
+                        if (!current()) return;
+                        results = results.concat(data && Array.isArray(data.results) ? data.results : []);
+                        if (!--pending) finish();
+                    }, error: function (xhr) {
+                        if (!current()) return;
+                        failure = uafilmsError(xhr, 'пошук').why;
+                        if (!--pending) finish();
+                    }}, scope);
+            });
         };
         function uafilmsSeasonNumbers() {
             if (!isTv) return [1];
@@ -3552,7 +3641,11 @@
             };
             cancelSources = uafilmsSources(tmdb, isTv ? number : 0, 1, function (found) {
                 if (!current()) return;
-                if (!found.length) return self.empty('UAFilms: для цієї картки немає озвучень із підтримуваними плеєрами.');
+                if (!found.length) {
+                    // Only the card's own number is replaced by a search; a number the viewer confirmed (or a typed name) is not searched again.
+                    if (tmdb === String(movie.id) && !manual) return self.uafilmsAlternatives('для цієї картки немає озвучень');
+                    return self.empty('UAFilms: для цієї картки немає озвучень.');
+                }
                 variants = found;
                 var cached = tmdbCache[number];
                 count = Math.min(2000, Math.max(count, cached && cached.__count || 0));
@@ -3767,6 +3860,7 @@
                 var variant = variants.filter(function (v) { return v.key === entry.ref.variant; })[0];
                 if (!variant) return failure('у цієї серії немає озвучення «' + entry.ref.variant.split('|')[1] + '»: обери інше в чипі «Озвучення»');
                 function done(stream, subtitles) { entry.subtitles = subtitles || []; success(entry.stream = stream); }
+                if (variant.stream) return done(variant.stream, []);
                 if (moonPage(variant.page)) {
                     entry.url = variant.page; // the Moon player switch on TVs looks at the episode's own page
                     return moonStream(variant.page, function (stream, subtitles, quality) { entry.streamAt = Date.now(); entry.quality = quality || entry.quality || 0; done(stream, subtitles); }, failure);
