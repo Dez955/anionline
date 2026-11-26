@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.34';
+    var VERSION = '2.0.35';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 5000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -3990,6 +3990,85 @@
             });
         };
 
+        // ---- Replacing an episode that does not start (every source, present and future) ----------------------------------------
+        // Order: the same episode on another player of this source (the same voice first), then the same episode through the UAFilms
+        // catalogue by the card's TMDB number, its season and episode (the same studio first). Never another episode number, never subtitles
+        // instead of a voice-over (or the reverse), at most 3 + 4 tries inside REPLACE_BUDGET. Watch progress stays on the episode of this card.
+        var REPLACE_BUDGET = 25000;
+        var GENERIC_PARTS = /^(?:озвучення|субтитри|ashdi|moon|uaflix|zetvideo|tortuga|fenix|плеєр|українська озвучка|українські субтитри|російська озвучка)$/;
+        function studioParts(label) {
+            return String(label || '').toLowerCase().split(/\s*·\s*/).map(function (part) { return part.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim(); })
+                .filter(function (part) { return part.length >= 2 && !GENERIC_PARTS.test(part); });
+        }
+        function sameStudio(label, wanted) {
+            return studioParts(label).some(function (part) { return wanted.some(function (w) { return part === w || part.indexOf(w) >= 0 || w.indexOf(part) >= 0; }); });
+        }
+        function replaceEpisode(entry, success, failure) {
+            var stopped = false, cancels = [], current = voices[voiceIndex] || {episodes: []};
+            var number = (entry.info && entry.info.number) || 0, wanted = studioParts(current.label), subs = /субтитр/i.test(current.label || '');
+            function stop() { stopped = true; clearTimeout(timer); cancels.splice(0).forEach(function (cancel) { try { cancel(); } catch (e) {} }); }
+            function give() { if (!stopped) { stop(); failure(); } }
+            var timer = setTimeout(give, REPLACE_BUDGET);
+            function episodeOf(voice) {
+                if (!number) return current.episodes.length === 1 && voice.episodes.length === 1 ? voice.episodes[0] : null; // a film: its one entry
+                return voice.episodes.filter(function (e) { return episodeInfo(e.title, item && item.title).number === number; })[0] || null;
+            }
+            var spares = voices.filter(function (v) { return v !== current && v.supported !== false && /субтитр/i.test(v.label || '') === subs; })
+                .map(function (v) { return {voice: v, episode: episodeOf(v)}; }).filter(function (x) { return x.episode; })
+                .sort(function (a, b) {
+                    return ((b.voice.label === current.label) - (a.voice.label === current.label)) || (sameStudio(b.voice.label, wanted) - sameStudio(a.voice.label, wanted));
+                }).slice(0, 3);
+            function local(i) {
+                if (stopped) return;
+                var x = spares[i];
+                if (!x) return remote();
+                var e = x.episode;
+                var spare = {url: e.url, ref: e.ref, kind: e.kind, wantSubtitles: e.subtitles, subtitles: e.subs, quality: e.quality || 0, supported: true,
+                    player: x.voice.player || '', info: entry.info, title: entry.title, timeline: entry.timeline};
+                cancels.push(self.resolve(spare, function (url) {
+                    if (stopped) return;
+                    prepareStream(spare, url, function () { if (stopped) return; stop(); success(spare, x.voice.label); });
+                }, function () { local(i + 1); }));
+            }
+            function remote() {
+                if (stopped) return;
+                var tmdb = String(movie.id || ''), s = 0, e = 1;
+                if (source === 'uafilms' || !/^\d{1,10}$/.test(tmdb) || !sourceAllowed('uafilms') || uafilmsBlocked()) return give();
+                if (isTv) {
+                    // The season is TMDB's: the source's own season when the card lists it with enough episodes, or the card's only season.
+                    if (!number) return give();
+                    var listed = (movie.seasons || []).filter(function (x) { return x && x.season_number > 0 && x.episode_count > 0; });
+                    var only = listed.length === 1 ? listed[0].season_number : (!listed.length && parseInt(movie.number_of_seasons, 10) === 1 ? 1 : 0);
+                    s = season > 0 && listed.some(function (x) { return x.season_number === season && x.episode_count >= number; }) ? season : only;
+                    if (!s) return give();
+                    e = number;
+                }
+                cancels.push(uafilmsSources(tmdb, s, e, function (variants) {
+                    if (stopped) return;
+                    var list = variants.filter(function (v) { return v.relay && v.subs === subs; }).sort(function (a, b) {
+                        return (sameStudio(b.label, wanted) - sameStudio(a.label, wanted)) || (!!b.stream - !!a.stream);
+                    }).slice(0, 4);
+                    (function next(i) {
+                        if (stopped) return;
+                        var v = list[i];
+                        if (!v) return give();
+                        var url = uafilmsPlayUrl(v, s, e);
+                        var xhr = $.ajax({url: url, dataType: 'text', timeout: 10000, cache: false, success: function (text) {
+                            if (stopped) return;
+                            text = String(text || '');
+                            if (!/^\s*#EXTM3U/.test(text) || /#EXT-X-ERROR/.test(text)) return next(i + 1);
+                            stop();
+                            success({url: 'uafilms:' + tmdb + ':' + s + ':' + e + ':' + v.key, ref: {}, stream: url, subtitles: [], quality: 0, supported: true,
+                                player: v.player, info: entry.info, title: entry.title, timeline: entry.timeline}, 'UAFilms · ' + v.label);
+                        }, error: function () { next(i + 1); }});
+                        cancels.push(function () { if (xhr && xhr.abort) xhr.abort(); });
+                    })(0);
+                }, give));
+            }
+            local(0);
+            return stop;
+        }
+
         this.play = function (index) {
             if (closed) return;
             var entry = entries[index];
@@ -4015,7 +4094,7 @@
             if (source === 'dorama') { behind = DORAMA_BEHIND; ahead = DORAMA_AHEAD; }
             var android = Lampa.Platform && Lampa.Platform.is('android');
             var from = android ? Math.max(0, index - behind) : index, to = android ? Math.min(entries.length - 1, index + ahead) : index;
-            var pending = to - from + 1, failure = '', selectedFailure = '', failed = [], started = false, grace = null;
+            var pending = to - from + 1, failure = '', selectedFailure = '', failed = [], started = false, grace = null, chosen = entry, replaced = false;
             var jobs = [], canceled = false;
             cancelPlay = function () {
                 canceled = true;
@@ -4037,9 +4116,25 @@
                 entry.loading = false;
                 if (closed || mine !== openSeq || playingToken !== token || request !== playSeq) return;
                 self.activity.loader(false);
-                if (!entry.stream || selectedFailure) {
+                if (chosen === entry && (!entry.stream || selectedFailure) && !replaced) {
+                    // Before giving up on this source: the same episode elsewhere.
+                    replaced = true;
+                    started = false; entry.loading = true;
+                    self.activity.loader(true);
+                    jobs.push(replaceEpisode(entry, function (spare, label) {
+                        if (canceled || closed || mine !== openSeq || request !== playSeq) return;
+                        try { Lampa.Noty.show('ДубльUA: «' + (voices[voiceIndex] ? voices[voiceIndex].label : entry.player) + '» не відповідає, граю «' + label + '»'); } catch (e) {}
+                        chosen = spare;
+                        launch();
+                    }, function () {
+                        if (canceled || closed || mine !== openSeq || request !== playSeq) return;
+                        launch();
+                    }));
+                    return;
+                }
+                if (!chosen.stream || (chosen === entry && selectedFailure)) {
                     launching = false;
-                    var why = 'Не вдалося отримати відео: ' + reason(selectedFailure || failure) + '.';
+                    var why = 'Не вдалося отримати відео: ' + reason(selectedFailure || failure) + '.' + (replaced ? ' Заміни в інших плеєрах і в UAFilms теж не знайшлося.' : '');
                     if (fallback(why)) return;
                     playbackStatus(moonPage(entry.url) ? 'AT-M1' : 'AT-P1', why + ' Спробуй іншу серію чи плеєр.');
                     if (refreshEpisodes) refreshEpisodes();
@@ -4050,8 +4145,8 @@
                 var shown = (item && source !== 'anilibria' && item.title) || displayName(); // AniLibria's own titles are Russian
                 var card = Object.assign({}, movie, {title: shown, name: shown});
                 playbackStatus('', '');
-                var first = Object.assign({title: entry.title, timeline: entry.timeline, card: card, anitube_owner: playbackOwner, anitube_version_shown: true, anitube_moon: !!moonPage(entry.url)}, playerFile(entry));
-                if (entry.subtitles && entry.subtitles.length) first.subtitles = entry.subtitles;
+                var first = Object.assign({title: entry.title, timeline: entry.timeline, card: card, anitube_owner: playbackOwner, anitube_version_shown: true, anitube_moon: !!moonPage(chosen.url)}, playerFile(chosen));
+                if (chosen.subtitles && chosen.subtitles.length) first.subtitles = chosen.subtitles;
                 var playlist = [];
                 entries.forEach(function (other, n) {
                     if (n === index) return playlist.push(first);
