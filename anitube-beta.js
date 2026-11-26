@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.31';
+    var VERSION = '2.0.32';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 5000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1553,26 +1553,75 @@
         if (uafilmsWaiting[path]) return uafilmsSubscribe(uafilmsWaiting[path], success, failure);
         var group = uafilmsWaiting[path] = uafilmsGroup(function () { delete uafilmsWaiting[path]; });
         var cancel = uafilmsSubscribe(group, success, failure);
+        function accept(data, partial) {
+            if (!group.active) return;
+            if (!data || !Array.isArray(data.sources)) return group.done(null, 'каталог повернув некоректний список джерел');
+            var list = uafilmsVariants(data);
+            var now = Date.now(), until = now + (list.length ? (partial ? 120000 : 600000) : 30000);
+            var expiry = typeof data.expiresAt === 'string' ? Date.parse(data.expiresAt) : NaN;
+            if (!isNaN(expiry)) until = Math.min(expiry, until);
+            Object.keys(uafilmsCache).forEach(function (key) { if (uafilmsCache[key].until <= now) delete uafilmsCache[key]; });
+            if (until > now) {
+                var keys = Object.keys(uafilmsCache);
+                if (keys.length >= 96) delete uafilmsCache[keys[0]];
+                uafilmsCache[path] = {until: until, list: list};
+            }
+            group.done(list);
+        }
+        // The catalogue's own Lampa client reads the answer as a stream (sse=1): every player arrives as soon as it is ready. A plain GET
+        // waits for ALL of them, and one stuck player (observed: no answer for 60 s) leaves the whole card without sources.
+        function streamSources(token, retried) {
+            if (!group.active) return;
+            var pause = uafilmsBlocked();
+            if (pause) return group.done(null, pause);
+            var stream = null, sources = [], over = false, quiet = null, cap = null;
+            function close() {
+                over = true;
+                clearTimeout(quiet);
+                clearTimeout(cap);
+                if (stream) { try { stream.close(); } catch (e) {} }
+            }
+            group.requests.push({abort: close});
+            function finish(partial) {
+                if (over) return;
+                close();
+                accept({sources: sources}, partial);
+            }
+            // No event at all: Cloudflare/ban/token answers cannot be read from an EventSource, so ask once with a plain request.
+            function fallback() {
+                if (over) return;
+                close();
+                fetchSources(token, retried);
+            }
+            try { stream = new EventSource(UAFILMS + path + '?platform=tv&sse=1&pow_token=' + encodeURIComponent(token)); } catch (e) { return fetchSources(token, retried); }
+            cap = setTimeout(function () {
+                if (over) return;
+                if (sources.length) finish(true);
+                else { close(); group.done(null, 'каталог не відповів вчасно'); }
+            }, 20000);
+            stream.addEventListener('provider', function (event) {
+                if (over) return;
+                var data;
+                try { data = JSON.parse(event.data); } catch (e) { return; }
+                if (data && Array.isArray(data.sources)) sources = sources.concat(data.sources);
+                clearTimeout(quiet);
+                // Something usable is in hand: give the slower players a few seconds, then stop waiting for the rest.
+                if (uafilmsVariants({sources: sources}).length) quiet = setTimeout(function () { finish(true); }, 4000);
+            });
+            stream.addEventListener('complete', function () { finish(false); });
+            stream.addEventListener('error', function () {
+                if (over) return;
+                if (sources.length) finish(true);
+                else fallback();
+            });
+        }
         function fetchSources(token, retried) {
             if (!group.active) return;
             var pause = uafilmsBlocked();
             if (pause) return group.done(null, pause);
             group.requests.push($.ajax({url: UAFILMS + path + '?platform=tv&pow_token=' + encodeURIComponent(token), dataType: 'json', timeout: 30000, cache: false,
-                success: function (data) {
-                    if (!group.active) return;
-                    if (!data || !Array.isArray(data.sources)) return group.done(null, 'каталог повернув некоректний список джерел');
-                    var list = uafilmsVariants(data);
-                    var now = Date.now(), until = now + (list.length ? 600000 : 30000);
-                    var expiry = typeof data.expiresAt === 'string' ? Date.parse(data.expiresAt) : NaN;
-                    if (!isNaN(expiry)) until = Math.min(expiry, until);
-                    Object.keys(uafilmsCache).forEach(function (key) { if (uafilmsCache[key].until <= now) delete uafilmsCache[key]; });
-                    if (until > now) {
-                        var keys = Object.keys(uafilmsCache);
-                        if (keys.length >= 96) delete uafilmsCache[keys[0]];
-                        uafilmsCache[path] = {until: until, list: list};
-                    }
-                    group.done(list);
-                }, error: function (xhr) {
+                success: function (data) { accept(data, false); },
+                error: function (xhr) {
                     if (!group.active) return;
                     var err = uafilmsError(xhr, 'каталог');
                     if (err.verify && !retried) {
@@ -1587,7 +1636,7 @@
         }
         function authorize(retried) {
             var previous = group.cancelToken;
-            var cancelToken = uafilmsToken(function (token) { fetchSources(token, retried); }, function (why) { group.done(null, why); });
+            var cancelToken = uafilmsToken(function (token) { (typeof EventSource === 'function' ? streamSources : fetchSources)(token, retried); }, function (why) { group.done(null, why); });
             if (typeof cancelToken === 'function' && group.cancelToken === previous) group.cancelToken = cancelToken;
         }
         authorize(false);
