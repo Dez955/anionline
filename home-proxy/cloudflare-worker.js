@@ -87,9 +87,11 @@ async function read(response) {
   return text;
 }
 
+const UPSTREAM_TIMEOUT = 12000;
 function get(url, referer = SITE + '/') {
   return fetch(url, {
     redirect: 'manual',
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT),
     headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Referer': referer }
   });
 }
@@ -122,6 +124,7 @@ async function playlist(raw) {
   const response = await fetch(SITE + '/engine/ajax/playlists.php', {
     method: 'POST',
     redirect: 'manual',
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT),
     headers: {
       'User-Agent': USER_AGENT,
       'Accept': 'application/json, text/javascript, */*; q=0.01',
@@ -150,7 +153,7 @@ async function embed(raw, env) {
   let text;
   if (/^https:\/\/\S+$/.test(relay)) {
     const target = relay + '/embed?url=' + encodeURIComponent(page) + '&key=' + encodeURIComponent(requiredRelayKey(env));
-    const response = await fetch(target, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT } });
+    const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: { 'User-Agent': USER_AGENT } });
     if (!response.ok) {
       let reason = 'HTTP ' + response.status;
       try { reason = JSON.parse(await response.text()).error || reason; } catch { /* keep the status */ }
@@ -173,7 +176,7 @@ async function ufRelay(path, url, env) {
   const relay = String((env && env.EMBED_URL) || '').trim().replace(/\/+$/, '');
   if (!/^https:\/\/\S+$/.test(relay)) return null;
   const target = relay + '/uf/' + path + '?' + url.searchParams.toString().replace(/(^|&)key=[^&]*/g, '') + '&key=' + encodeURIComponent(requiredRelayKey(env));
-  const response = await fetch(target, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT } });
+  const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: { 'User-Agent': USER_AGENT } });
   const body = await response.text();
   if (!response.ok) {
     let reason = 'HTTP ' + response.status;
@@ -194,7 +197,7 @@ async function ufLogin(request, env) {
   const password = String((body && body.password) || '');
   if (!login || !password || login.length > 100 || password.length > 200) return json({ ok: false, error: '\u0432\u043a\u0430\u0436\u0456\u0442\u044c \u043b\u043e\u0433\u0456\u043d \u0456 \u043f\u0430\u0440\u043e\u043b\u044c' }, 400);
   const target = relay + '/uf/login?key=' + encodeURIComponent(requiredRelayKey(env));
-  const response = await fetch(target, { method: 'POST', redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Content-Type': 'application/json' }, body: JSON.stringify({ login, password }) });
+  const response = await fetch(target, { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: { 'User-Agent': USER_AGENT, 'Content-Type': 'application/json' }, body: JSON.stringify({ login, password }) });
   const text = await response.text();
   let answer;
   try { answer = JSON.parse(text); } catch (e) { return json({ ok: false, error: '\u0431\u043e\u0442 \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0432 HTTP ' + response.status }, UPSTREAM_STATUS); }
@@ -250,7 +253,7 @@ async function uaserialsPage(raw) {
 async function uaserialsPlayer(raw) {
   const page = validPage(raw, 'hdvbua.pro', UASERIALS_PLAYER);
   if (!page) return null;
-  return read(await fetch(page, { redirect: 'manual', headers: {
+  return read(await fetch(page, { redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: {
     'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8', 'Referer': UASERIALS + '/'
   } }));
 }
@@ -273,7 +276,7 @@ async function kodikRoute(action, params) {
     // The public player page of one Kodik serial (address taken from the official API answer); only that exact address shape is fetched.
     const embed = validKodikPlayer(params.get('url') || '');
     if (!embed) return json({ error: 'invalid_kodik_embed' }, 400);
-    return html(await read(await fetch(embed, { redirect: 'manual', headers: {
+    return html(await read(await fetch(embed, { redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: {
       'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8'
     } })));
   }
@@ -321,7 +324,7 @@ async function kodikApi(params, env) {
   form.set('limit', String(Math.min(Math.max(parseInt(params.get('limit') || '', 10) || 50, 1), 100)));
   if (kodikApiRateLimited()) return json({ error: 'kodik_rate_limited' }, 429);
   form.set('token', token);
-  const raw = await read(await fetch('https://kodik-api.com/search', { method: 'POST', redirect: 'manual', headers: {
+  const raw = await read(await fetch('https://kodik-api.com/search', { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: {
     'User-Agent': USER_AGENT, 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
   }, body: form.toString() }));
   let data;
@@ -338,7 +341,7 @@ async function kodikApi(params, env) {
 }
 
 function plainGet(url) {
-  return fetch(url, { redirect: 'manual', headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8' } });
+  return fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8' } });
 }
 
 async function dleRoute(site, action, params) {
@@ -501,7 +504,7 @@ async function doramaPlayer(params) {
   url.searchParams.set('ep', ep);
   if (track) url.searchParams.set('track', track);
   if (seasonParam) url.searchParams.set(seasonParam, season);
-  const text = await read(await fetch(url.href, {redirect: 'manual', headers: {
+  const text = await read(await fetch(url.href, {redirect: 'manual', signal: AbortSignal.timeout(UPSTREAM_TIMEOUT), headers: {
     'User-Agent': USER_AGENT, 'Accept': 'text/html', 'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8'
   }}));
   if (!/data-config\s*=/.test(text) && /\u043d\u0435[\s\S]{0,15}\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e \u0432 \u0432\u0430\u0448\u0435\u043c \u0440\u0435\u0433\u0438\u043e\u043d\u0435|\u0417\u043c\u0456\u043d\u0456\u0442\u044c \u043a\u0440\u0430\u0457\u043d\u0443 \u043f\u0435\u0440\u0435\u0433\u043b\u044f\u0434\u0443/i.test(text)) {
