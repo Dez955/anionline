@@ -5,7 +5,7 @@
     var HOME = 'https://anitube.in.ua/';
     var API = 'https://anitube-lampa-proxy.netlify.app/.netlify/functions/anitube';
     var COMPONENT = 'anitube';
-    var VERSION = '2.0.33';
+    var VERSION = '2.0.34';
     var PLAYLIST_AHEAD = 15, PLAYLIST_BEHIND = 3, NEIGHBOUR_GRACE = 2000, SEARCH_BUDGET = 5000;
     // uafix needs one page request per episode, so their window around the chosen episode is smaller.
     var UAFIX_AHEAD = 6, UAFIX_BEHIND = 1;
@@ -1679,8 +1679,20 @@
             var label = generic && player === 'UAflix' ? 'UAflix' : studio + ' · ' + player, key = provider + '|' + studio;
             if (seen[key]) return null;
             seen[key] = true;
-            return {key: key, label: label, player: player, page: page, stream: relay, subs: studio === 'Субтитри'};
+            // `relay` is the catalogue's own playlist for this player: the way back when reading the hosting directly fails.
+            return {key: key, label: label, player: player, page: page, stream: relay, relay: s.url, voice: generic ? '' : studio, shared: s.sharedVideo === true, subs: studio === 'Субтитри'};
         }).filter(Boolean).sort(function (a, b) { return (a.subs - b.subs) || (!!a.stream - !!b.stream); }); // Ukrainian voices first, the subtitled original after them; relayed players after the direct ones
+    }
+    // The address the catalogue's own client plays: the season and episode added to a series, cors=1 for Ashdi and Tortuga (Lampa's own player),
+    // and for one video shared by several voices the voice to merge in.
+    function uafilmsPlayUrl(variant, season, episode) {
+        var url = String(variant.relay || '');
+        function add(part) { url += (url.indexOf('?') < 0 ? '?' : '&') + part; }
+        if (season && !/[?&]s=/.test(url)) add('s=' + season);
+        if (season && !/[?&]e=/.test(url)) add('e=' + episode);
+        if (variant.shared && variant.voice && !/[?&]voice=/.test(url)) add('voice=' + encodeURIComponent(variant.voice) + '&mergeAudio=1');
+        if ((/^(ashdi|tortuga)\|/.test(variant.key) || /ashdi|tortuga/i.test(url)) && !/[?&]cors=/.test(url)) add('cors=1');
+        return url;
     }
     // The catalogue's own search (TMDB-shaped records) is the way to find a card whose TMDB number has no players: the same show can sit under another
     // number, and its name there is often different. Candidates are judged by everything the record carries, not by the name alone: the names (all of
@@ -3855,19 +3867,51 @@
         };
 
         // A UAFilms episode is asked for its players when it is played; the page of the same voice is then read like any other.
+        // When the hosting does not answer (Ashdi's players gave HTTP 502 for everyone on 26.11), the same episode is taken the way the catalogue's own
+        // client plays it: its relay of this player, then the same voice on another player. Each relay playlist is checked before it is handed over.
         function uafilmsStream(entry, success, failure) {
-            return uafilmsSources(item.ref.tmdb, entry.ref.season, entry.ref.episode, function (variants) {
+            var stopped = false, check = null, cancel;
+            cancel = uafilmsSources(item.ref.tmdb, entry.ref.season, entry.ref.episode, function (variants) {
+                if (stopped) return;
                 var variant = variants.filter(function (v) { return v.key === entry.ref.variant; })[0];
                 if (!variant) return failure('у цієї серії немає озвучення «' + entry.ref.variant.split('|')[1] + '»: обери інше в чипі «Озвучення»');
+                var studio = variant.key.slice(variant.key.indexOf('|') + 1), tried = [];
                 function done(stream, subtitles) { entry.subtitles = subtitles || []; success(entry.stream = stream); }
-                if (variant.stream) return done(variant.stream, []);
+                function next(list, why) {
+                    if (stopped) return;
+                    var candidate = list.shift();
+                    if (!candidate) return failure(why + (tried.length ? '; через каталог (' + tried.join(', ') + ') теж не вдалося' : ''));
+                    tried.push(candidate.player);
+                    var url = uafilmsPlayUrl(candidate, entry.ref.season, entry.ref.episode);
+                    check = $.ajax({url: url, dataType: 'text', timeout: 10000, cache: false, success: function (text) {
+                        if (stopped) return;
+                        text = String(text || '');
+                        if (!/^\s*#EXTM3U/.test(text) || /#EXT-X-ERROR/.test(text)) return next(list, why);
+                        if (candidate !== variant) { try { Lampa.Noty.show('UAFilms: «' + variant.label + '» не відповідає, граю «' + candidate.label + '»'); } catch (e) {} }
+                        done(url, []);
+                    }, error: function () { next(list, why); }});
+                }
+                // The same voice on another player first; then any other voice (not the subtitled original unless that was asked), because a
+                // working episode with a notice is better than none. At most four relays are asked.
+                function fallback(why) {
+                    var same = function (v) { return v.key.slice(v.key.indexOf('|') + 1) === studio; };
+                    var spare = variants.filter(function (v) { return v !== variant && v.relay && (v.subs === variant.subs); })
+                        .sort(function (a, b) { return (same(b) - same(a)) || (!!b.stream - !!a.stream); }); // relay-only players are the catalogue's strongest relays
+                    next([variant].filter(function (v) { return v.relay; }).concat(spare).slice(0, 4), why || 'плеєр «' + variant.player + '» не відповів');
+                }
+                if (!variant.page) return fallback('');
                 if (moonPage(variant.page)) {
                     entry.url = variant.page; // the Moon player switch on TVs looks at the episode's own page
-                    return moonStream(variant.page, function (stream, subtitles, quality) { entry.streamAt = Date.now(); entry.quality = quality || entry.quality || 0; done(stream, subtitles); }, failure);
+                    return moonStream(variant.page, function (stream, subtitles, quality) { entry.streamAt = Date.now(); entry.quality = quality || entry.quality || 0; done(stream, subtitles); }, fallback);
                 }
-                if (zetPage(variant.page)) return zetStream(variant.page, done, failure);
-                ashdiStream(variant.page, done, failure);
+                if (zetPage(variant.page)) return zetStream(variant.page, done, fallback);
+                ashdiStream(variant.page, done, fallback);
             }, failure);
+            return function () {
+                stopped = true;
+                if (check && check.abort) check.abort();
+                if (typeof cancel === 'function') cancel();
+            };
         }
 
         // 3. episode list with watch progress; the whole list becomes the player's playlist
